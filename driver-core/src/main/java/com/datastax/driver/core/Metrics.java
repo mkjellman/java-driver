@@ -32,13 +32,13 @@ public class Metrics {
 
     private final Gauge<Integer> knownHosts = registry.newGauge(Metrics.class, "known-hosts", new Gauge<Integer>() {
         @Override
-        public Integer value() {
+        public Integer getValue() {
             return manager.metadata.allHosts().size();
         }
     });
     private final Gauge<Integer> connectedTo = registry.newGauge(Metrics.class, "connected-to", new Gauge<Integer>() {
         @Override
-        public Integer value() {
+        public Integer getValue() {
             Set<Host> s = new HashSet<Host>();
             for (Session session : manager.sessions)
                 s.addAll(session.manager.pools.keySet());
@@ -47,7 +47,7 @@ public class Metrics {
     });
     private final Gauge<Integer> openConnections = registry.newGauge(Metrics.class, "open-connections", new Gauge<Integer>() {
         @Override
-        public Integer value() {
+        public Integer getValue() {
             int value = manager.controlConnection.isOpen() ? 1 : 0;
             for (Session session : manager.sessions)
                 for (HostConnectionPool pool : session.manager.pools.values())
