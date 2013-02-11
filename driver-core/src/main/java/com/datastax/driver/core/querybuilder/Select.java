@@ -21,6 +21,7 @@ public class Select extends BuiltStatement {
     private final Where where;
     private List<Ordering> orderings;
     private int limit = -1;
+    private boolean allowFiltering;
 
     Select(String keyspace, String table, List<String> columnNames) {
         super();
@@ -58,13 +59,16 @@ public class Select extends BuiltStatement {
         }
 
         if (orderings != null) {
-            builder.append(" ORDER BY (");
+            builder.append(" ORDER BY ");
             Utils.joinAndAppend(builder, ",", orderings);
-            builder.append(")");
         }
 
         if (limit > 0) {
             builder.append(" LIMIT ").append(limit);
+        }
+
+        if (allowFiltering) {
+            builder.append(" ALLOW FILTERING");
         }
 
         return builder.toString();
@@ -128,6 +132,16 @@ public class Select extends BuiltStatement {
 
         this.limit = limit;
         setDirty();
+        return this;
+    }
+
+    /**
+     * Adds an ALLOW FILTERING directive to this statement.
+     *
+     * @return this statement.
+     */
+    public Select allowFiltering() {
+        allowFiltering = true;
         return this;
     }
 
