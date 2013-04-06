@@ -1,3 +1,18 @@
+/*
+ *      Copyright (C) 2012 DataStax Inc.
+ *
+ *   Licensed under the Apache License, Version 2.0 (the "License");
+ *   you may not use this file except in compliance with the License.
+ *   You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *   Unless required by applicable law or agreed to in writing, software
+ *   distributed under the License is distributed on an "AS IS" BASIS,
+ *   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *   See the License for the specific language governing permissions and
+ *   limitations under the License.
+ */
 package com.datastax.driver.core;
 
 import java.net.InetAddress;
@@ -6,6 +21,8 @@ import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import com.google.common.collect.HashMultimap;
+import com.google.common.collect.SetMultimap;
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
 
 import org.apache.cassandra.utils.MD5Digest;
@@ -13,7 +30,6 @@ import org.apache.cassandra.transport.Event;
 import org.apache.cassandra.transport.Message;
 import org.apache.cassandra.transport.messages.EventMessage;
 import org.apache.cassandra.transport.messages.PrepareMessage;
-import org.apache.cassandra.transport.messages.QueryMessage;
 
 import com.datastax.driver.core.exceptions.*;
 import com.datastax.driver.core.policies.*;
@@ -22,7 +38,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Informations and known state of a Cassandra cluster.
+ * information and known state of a Cassandra cluster.
  * <p>
  * This is the main entry point of the driver. A simple example of access to a
  * Cassandra cluster would be:
@@ -35,7 +51,7 @@ import org.slf4j.LoggerFactory;
  * </pre>
  * <p>
  * A cluster object maintains a permanent connection to one of the cluster node
- * that it uses solely to maintain informations on the state and current
+ * that it uses solely to maintain information on the state and current
  * topology of the cluster. Using the connection, the driver will discover all
  * the nodes composing the cluster as well as new nodes joining the cluster.
  */
@@ -45,7 +61,7 @@ public class Cluster {
 
     final Manager manager;
 
-    private Cluster(List<InetAddress> contactPoints, Configuration configuration) throws NoHostAvailableException {
+    private Cluster(List<InetAddress> contactPoints, Configuration configuration) {
         this.manager = new Manager(contactPoints, configuration);
         this.manager.init();
     }
@@ -69,7 +85,7 @@ public class Cluster {
      * @throws AuthenticationException if while contacting the initial
      * contact points an authencation error occurs.
      */
-    public static Cluster buildFrom(Initializer initializer) throws NoHostAvailableException {
+    public static Cluster buildFrom(Initializer initializer) {
         List<InetAddress> contactPoints = initializer.getContactPoints();
         if (contactPoints.isEmpty())
             throw new IllegalArgumentException("Cannot build a cluster without contact points");
@@ -108,7 +124,7 @@ public class Cluster {
      * @throws NoHostAvailableException if no host can be contacted to set the
      * {@code keyspace}.
      */
-    public Session connect(String keyspace) throws NoHostAvailableException {
+    public Session connect(String keyspace) {
         Session session = connect();
         session.manager.setKeyspace(keyspace);
         return session;
@@ -438,7 +454,7 @@ public class Cluster {
          * @throws AuthenticationException if while contacting the initial
          * contact points an authencation error occurs.
          */
-        public Cluster build() throws NoHostAvailableException {
+        public Cluster build() {
             return Cluster.buildFrom(this);
         }
     }
@@ -476,14 +492,13 @@ public class Cluster {
 
         final AtomicBoolean isShutdown = new AtomicBoolean(false);
 
-        // All the queries that have been prepared (we keep them so we can
-        // re-prepared them when a node fail or a new one join the cluster).
-        // Note: we could move this down to the session level, but since
-        // prepared statement are global to a node, this would yield a slightly
-        // less clear behavior.
-        final Map<MD5Digest, String> preparedQueries = new ConcurrentHashMap<MD5Digest, String>();
+        // All the queries that have been prepared (we keep them so we can re-prepared them when a node fail or a
+        // new one join the cluster).
+        // Note: we could move this down to the session level, but since prepared statement are global to a node,
+        // this would yield a slightly less clear behavior.
+        final Map<MD5Digest, PreparedStatement> preparedQueries = new ConcurrentHashMap<MD5Digest, PreparedStatement>();
 
-        private Manager(List<InetAddress> contactPoints, Configuration configuration) throws NoHostAvailableException {
+        private Manager(List<InetAddress> contactPoints, Configuration configuration) {
             this.configuration = configuration;
             this.metadata = new Metadata(this);
             this.contactPoints = contactPoints;
@@ -553,7 +568,7 @@ public class Cluster {
             try {
                 prepareAllQueries(host);
             } catch (InterruptedException e) {
-                Thread.currentThread().interrupted();
+                Thread.interrupted();
                 // Don't propagate because we don't want to prevent other listener to run
             }
 
@@ -601,7 +616,7 @@ public class Cluster {
             try {
                 prepareAllQueries(host);
             } catch (InterruptedException e) {
-                Thread.currentThread().interrupted();
+                Thread.interrupted();
                 // Don't propagate because we don't want to prevent other listener to run
             }
 
@@ -645,38 +660,68 @@ public class Cluster {
 
         // Prepare a query on all nodes
         // Note that this *assumes* the query is valid.
-        public void prepare(MD5Digest digest, String query, InetAddress toExclude) throws InterruptedException {
-            preparedQueries.put(digest, query);
+        public void prepare(MD5Digest digest, PreparedStatement stmt, InetAddress toExclude) throws InterruptedException {
+            preparedQueries.put(digest, stmt);
             for (Session s : sessions)
-                s.manager.prepare(query, toExclude);
+                s.manager.prepare(stmt.getQueryString(), toExclude);
         }
 
         private void prepareAllQueries(Host host) throws InterruptedException {
             if (preparedQueries.isEmpty())
                 return;
 
+            logger.debug("Preparing {} prepared queries on newly up node {}", preparedQueries.size(), host);
             try {
                 Connection connection = connectionFactory.open(host);
 
-                try {
-                    ControlConnection.waitForSchemaAgreement(connection, metadata);
-                } catch (ExecutionException e) {
-                    // As below, just move on
-                }
-
-                List<Connection.Future> futures = new ArrayList<Connection.Future>(preparedQueries.size());
-                for (String query : preparedQueries.values()) {
-                    futures.add(connection.write(new PrepareMessage(query)));
-                }
-                for (Connection.Future future : futures) {
+                try
+                {
                     try {
-                        future.get();
+                        ControlConnection.waitForSchemaAgreement(connection, metadata);
                     } catch (ExecutionException e) {
-                        // This "might" happen if we drop a CF but haven't removed it's prepared queries (which we don't do
-                        // currently). It's not a big deal however as if it's a more serious problem it'll show up later when
-                        // the query is tried for execution.
-                        logger.debug("Unexpected error while preparing queries on new/newly up host", e);
+                        // As below, just move on
                     }
+
+                    // Furthermore, along with each prepared query we keep the current keyspace at the time of preparation
+                    // as we need to make it is the same when we re-prepare on new/restarted nodes. Most query will use the
+                    // same keyspace so keeping it each time is slightly wasteful, but this doesn't really matter and is
+                    // simpler. Besides, we do avoid in prepareAllQueries to not set the current keyspace more than needed.
+
+                    // We need to make sure we prepared every query with the right current keyspace, i.e. the one originally
+                    // used for preparing it. However, since we are likely that all prepared query belong to only a handful
+                    // of different keyspace (possibly only one), and to avoid setting the current keyspace more than needed,
+                    // we first sort the query per keyspace.
+                    SetMultimap<String, String> perKeyspace = HashMultimap.create();
+                    for (PreparedStatement ps : preparedQueries.values()) {
+                        // It's possible for a query to not have a current keyspace. But since null doesn't work well as
+                        // map keys, we use the empty string instead (that is not a valid keyspace name).
+                        String keyspace = ps.getQueryKeyspace() == null ? "" : ps.getQueryKeyspace();
+                        perKeyspace.put(keyspace, ps.getQueryString());
+                    }
+
+                    for (String keyspace : perKeyspace.keySet())
+                    {
+                        // Empty string mean no particular keyspace to set
+                        if (!keyspace.isEmpty())
+                            connection.setKeyspace(keyspace);
+
+                        List<Connection.Future> futures = new ArrayList<Connection.Future>(preparedQueries.size());
+                        for (String query : perKeyspace.get(keyspace)) {
+                            futures.add(connection.write(new PrepareMessage(query)));
+                        }
+                        for (Connection.Future future : futures) {
+                            try {
+                                future.get();
+                            } catch (ExecutionException e) {
+                                // This "might" happen if we drop a CF but haven't removed it's prepared queries (which we don't do
+                                // currently). It's not a big deal however as if it's a more serious problem it'll show up later when
+                                // the query is tried for execution.
+                                logger.debug("Unexpected error while preparing queries on new/newly up host", e);
+                            }
+                        }
+                    }
+                } finally {
+                    connection.close();
                 }
             } catch (ConnectionException e) {
                 // Ignore, not a big deal
@@ -802,5 +847,6 @@ public class Cluster {
                 }
             }, 1, TimeUnit.SECONDS);
         }
+
     }
 }

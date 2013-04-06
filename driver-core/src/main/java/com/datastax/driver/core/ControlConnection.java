@@ -1,3 +1,18 @@
+/*
+ *      Copyright (C) 2012 DataStax Inc.
+ *
+ *   Licensed under the Apache License, Version 2.0 (the "License");
+ *   you may not use this file except in compliance with the License.
+ *   You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *   Unless required by applicable law or agreed to in writing, software
+ *   distributed under the License is distributed on an "AS IS" BASIS,
+ *   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *   See the License for the specific language governing permissions and
+ *   limitations under the License.
+ */
 package com.datastax.driver.core;
 
 import java.net.InetAddress;
@@ -9,9 +24,6 @@ import java.util.concurrent.*;
 import org.apache.cassandra.transport.Event;
 import org.apache.cassandra.transport.messages.RegisterMessage;
 import org.apache.cassandra.transport.messages.QueryMessage;
-
-import com.google.common.collect.Sets;
-import com.google.common.util.concurrent.Uninterruptibles;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -64,7 +76,7 @@ class ControlConnection implements Host.StateListener {
     }
 
     // Only for the initial connection. Does not schedule retries if it fails
-    public void connect() throws NoHostAvailableException {
+    public void connect() {
         if (isShutdown)
             return;
 
@@ -119,7 +131,7 @@ class ControlConnection implements Host.StateListener {
             old.close();
     }
 
-    private Connection reconnectInternal() throws NoHostAvailableException {
+    private Connection reconnectInternal() {
 
         Iterator<Host> iter = balancingPolicy.newQueryPlan(Query.DEFAULT);
         Map<InetAddress, String> errors = null;
@@ -132,6 +144,7 @@ class ControlConnection implements Host.StateListener {
                     return tryConnect(host);
                 } catch (ConnectionException e) {
                     errors = logError(host, e.getMessage(), errors, iter);
+                    host.getMonitor().signalConnectionFailure(e);
                 } catch (ExecutionException e) {
                     errors = logError(host, e.getMessage(), errors, iter);
                 }
@@ -234,7 +247,7 @@ class ControlConnection implements Host.StateListener {
 
         logger.debug(String.format("[Control connection] Refreshing node list and token map"));
         try {
-            refreshNodeListAndTokenMap(connectionRef.get());
+            refreshNodeListAndTokenMap(c);
         } catch (ConnectionException e) {
             logger.debug("[Control connection] Connection error while refeshing node list and token map ({})", e.getMessage());
             reconnect();
@@ -268,16 +281,20 @@ class ControlConnection implements Host.StateListener {
             if (clusterName != null)
                 cluster.metadata.clusterName = clusterName;
 
+            partitioner = localRow.getString("partitioner");
+
             Host host = cluster.metadata.getHost(connection.address);
             // In theory host can't be null. However there is no point in risking a NPE in case we
             // have a race between a node removal and this.
-            if (host != null)
+            if (host == null) {
+                logger.debug("Host in local system table ({}) unknown to us (ok if said host just got removed)", connection.address);
+            } else {
                 host.setLocationInfo(localRow.getString("data_center"), localRow.getString("rack"));
 
-            partitioner = localRow.getString("partitioner");
-            Set<String> tokens = localRow.getSet("tokens", String.class);
-            if (partitioner != null && !tokens.isEmpty())
-                tokenMap.put(host, tokens);
+                Set<String> tokens = localRow.getSet("tokens", String.class);
+                if (partitioner != null && !tokens.isEmpty())
+                    tokenMap.put(host, tokens);
+            }
         }
 
         List<InetAddress> foundHosts = new ArrayList<InetAddress>();
@@ -380,7 +397,7 @@ class ControlConnection implements Host.StateListener {
         // If that's the host we're connected to, and we haven't yet schedul a reconnection, pre-emptively start one
         Connection current = connectionRef.get();
         if (logger.isTraceEnabled())
-            logger.trace("[Control connection] %s is down, currently connected to {}", host, current == null ? "nobody" : current.address);
+            logger.trace("[Control connection] {} is down, currently connected to {}", host, current == null ? "nobody" : current.address);
         if (current != null && current.address.equals(host.getAddress()) && reconnectionAttempt.get() == null)
             reconnect();
     }

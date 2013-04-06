@@ -1,8 +1,22 @@
+/*
+ *      Copyright (C) 2012 DataStax Inc.
+ *
+ *   Licensed under the Apache License, Version 2.0 (the "License");
+ *   you may not use this file except in compliance with the License.
+ *   You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *   Unless required by applicable law or agreed to in writing, software
+ *   distributed under the License is distributed on an "AS IS" BASIS,
+ *   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *   See the License for the specific language governing permissions and
+ *   limitations under the License.
+ */
 package com.datastax.driver.core.querybuilder;
 
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
 
 import com.datastax.driver.core.Statement;
@@ -28,7 +42,7 @@ public class Batch extends BuiltStatement {
 
     protected String buildQueryString() {
         StringBuilder builder = new StringBuilder();
-        builder.append("BEGIN BATCH");
+        builder.append(isCounterOp() ? "BEGIN COUNTER BATCH" : "BEGIN BATCH");
 
         if (!usings.usings.isEmpty()) {
             builder.append(" USING ");
@@ -51,8 +65,18 @@ public class Batch extends BuiltStatement {
      *
      * @param statement the new statement to add.
      * @return this batch.
+     *
+     * @throws IllegalArgumentException if counter and non-counter operations
+     * are mixed.
      */
     public Batch add(Statement statement) {
+        boolean isCounterOp = statement instanceof BuiltStatement && ((BuiltStatement) statement).isCounterOp();
+
+        if (this.isCounterOp == null)
+            setCounterOp(isCounterOp);
+        else if (isCounterOp() != isCounterOp)
+            throw new IllegalArgumentException("Cannot mix counter operations and non-counter operations in a batch statement");
+
         this.statements.add(statement);
         setDirty();
 

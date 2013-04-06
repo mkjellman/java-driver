@@ -1,3 +1,18 @@
+/*
+ *      Copyright (C) 2012 DataStax Inc.
+ *
+ *   Licensed under the Apache License, Version 2.0 (the "License");
+ *   you may not use this file except in compliance with the License.
+ *   You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *   Unless required by applicable law or agreed to in writing, software
+ *   distributed under the License is distributed on an "AS IS" BASIS,
+ *   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *   See the License for the specific language governing permissions and
+ *   limitations under the License.
+ */
 package com.datastax.driver.core.querybuilder;
 
 import java.util.Arrays;
@@ -25,6 +40,8 @@ import com.datastax.driver.core.TableMetadata;
  * Note that it could be convenient to use an 'import static' to use the methods of this class.
  */
 public final class QueryBuilder {
+
+    static final Object BIND_MARKER = new Object() {};
 
     private QueryBuilder() {}
 
@@ -546,5 +563,23 @@ public final class QueryBuilder {
      */
     public static Assignment putAll(String name, Map<?, ?> map) {
         return new Assignment.CollectionAssignment(name, map, true);
+    }
+
+    /**
+     * An object representing a bind marker (a question mark).
+     * <p>
+     * This can be used wherever a value is expected. For instance, one can do:
+     * <pre>
+     * {@code
+     *     Insert i = QueryBuilder.insertInto("test").value("k", 0)
+     *                                               .value("c", QueryBuilder.bindMarker());
+     *     PreparedState p = session.prepare(i.toString());
+     * }
+     * </pre>
+     *
+     * @return an object representing a bind marker.
+     */
+    public static Object bindMarker() {
+        return BIND_MARKER;
     }
 }

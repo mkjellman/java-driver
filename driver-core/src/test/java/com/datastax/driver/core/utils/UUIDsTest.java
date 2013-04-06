@@ -1,3 +1,18 @@
+/*
+ *      Copyright (C) 2012 DataStax Inc.
+ *
+ *   Licensed under the Apache License, Version 2.0 (the "License");
+ *   you may not use this file except in compliance with the License.
+ *   You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *   Unless required by applicable law or agreed to in writing, software
+ *   distributed under the License is distributed on an "AS IS" BASIS,
+ *   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *   See the License for the specific language governing permissions and
+ *   limitations under the License.
+ */
 package com.datastax.driver.core.utils;
 
 import java.nio.ByteBuffer;
@@ -7,14 +22,14 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentSkipListSet;
 
-import org.junit.Test;
-import static org.junit.Assert.*;
+import static org.testng.Assert.*;
 
 import org.apache.cassandra.db.marshal.TimeUUIDType;
+import org.testng.annotations.Test;
 
 public class UUIDsTest {
 
-    @Test
+    @Test(groups = "unit")
     public void conformanceTest() {
 
         // The UUIDs class does some computation at class initialization, which
@@ -25,8 +40,8 @@ public class UUIDsTest {
         long now = System.currentTimeMillis();
         UUID uuid = UUIDs.timeBased();
 
-        assertEquals(1, uuid.version());
-        assertEquals(2, uuid.variant());
+        assertEquals(uuid.version(), 1);
+        assertEquals(uuid.variant(), 2);
 
         long tstamp = UUIDs.unixTimestamp(uuid);
 
@@ -34,7 +49,7 @@ public class UUIDsTest {
         assert now <= tstamp && now >= tstamp - 10 : String.format("now = %d, tstamp = %d", now, tstamp);
     }
 
-    @Test
+    @Test(groups = "unit")
     public void uniquenessTest() {
         // Generate 1M uuid and check we never have twice the same one
 
@@ -44,13 +59,13 @@ public class UUIDsTest {
         for (int i = 0; i < nbGenerated; ++i)
             generated.add(UUIDs.timeBased());
 
-        assertEquals(nbGenerated, generated.size());
+        assertEquals(generated.size(), nbGenerated);
     }
 
-    @Test
+    @Test(groups = "unit")
     public void multiThreadUniquenessTest() throws Exception {
         int nbThread = 10;
-        int nbGenerated = 500000;
+        int nbGenerated = 10000;
         Set<UUID> generated = new ConcurrentSkipListSet<UUID>();
 
         UUIDGenerator[] generators = new UUIDGenerator[nbThread];
@@ -63,10 +78,10 @@ public class UUIDsTest {
         for (int i = 0; i < nbThread; i++)
             generators[i].join();
 
-        assertEquals(nbThread * nbGenerated, generated.size());
+        assertEquals(generated.size(), nbThread * nbGenerated);
     }
 
-    @Test
+    @Test(groups = "unit")
     public void timestampIncreasingTest() {
         // Generate 1M uuid and check timestamp are always increasing
         int nbGenerated = 1000000;
@@ -78,7 +93,7 @@ public class UUIDsTest {
         }
     }
 
-    @Test
+    @Test(groups = "unit")
     public void startEndOfTest() {
 
         Random random = new Random(System.currentTimeMillis());

@@ -1,12 +1,25 @@
+/*
+ *      Copyright (C) 2012 DataStax Inc.
+ *
+ *   Licensed under the Apache License, Version 2.0 (the "License");
+ *   you may not use this file except in compliance with the License.
+ *   You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *   Unless required by applicable law or agreed to in writing, software
+ *   distributed under the License is distributed on an "AS IS" BASIS,
+ *   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *   See the License for the specific language governing permissions and
+ *   limitations under the License.
+ */
 package com.datastax.driver.core;
 
-import java.util.*;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.TimeUnit;
 
 import com.google.common.base.Throwables;
-import com.google.common.util.concurrent.Uninterruptibles;
 
 import org.apache.cassandra.transport.Message;
 import org.apache.cassandra.transport.messages.ErrorMessage;
@@ -23,24 +36,28 @@ import com.datastax.driver.core.exceptions.*;
 public class ResultSetFuture extends SimpleFuture<ResultSet>
 {
     private final Session.Manager session;
-    private final Message.Request request;
-    final ResponseCallback callback = new ResponseCallback();
+    final ResponseCallback callback;
 
     ResultSetFuture(Session.Manager session, Message.Request request) {
         this.session = session;
-        this.request = request;
+        this.callback = new ResponseCallback(request);
     }
 
-    // The only reason this exists is because we don't want to expose its
-    // method publicly (otherwise Future could have implemented
-    // Connection.ResponseCallback directly)
-    class ResponseCallback implements Connection.ResponseCallback {
+    // The reason this exists is because we don't want to expose its method
+    // publicly (otherwise Future could implement RequestHandler.Callback directly)
+    class ResponseCallback implements RequestHandler.Callback {
+
+        private final Message.Request request;
+
+        ResponseCallback(Message.Request request) {
+            this.request = request;
+        }
 
         public Message.Request request() {
             return request;
         }
 
-        public void onSet(Connection connection, Message.Response response) {
+        public void onSet(Connection connection, Message.Response response, ExecutionInfo info) {
             try {
                 switch (response.type) {
                     case RESULT:
@@ -49,11 +66,11 @@ public class ResultSetFuture extends SimpleFuture<ResultSet>
                             case SET_KEYSPACE:
                                 // propagate the keyspace change to other connections
                                 session.poolsState.setKeyspace(((ResultMessage.SetKeyspace)rm).keyspace);
-                                set(ResultSet.fromMessage(rm, session, connection.address));
+                                set(ResultSet.fromMessage(rm, session, info));
                                 break;
                             case SCHEMA_CHANGE:
                                 ResultMessage.SchemaChange scc = (ResultMessage.SchemaChange)rm;
-                                ResultSet rs = ResultSet.fromMessage(rm, session, connection.address);
+                                ResultSet rs = ResultSet.fromMessage(rm, session, info);
                                 switch (scc.change) {
                                     case CREATED:
                                         if (scc.columnFamily.isEmpty()) {
@@ -65,8 +82,10 @@ public class ResultSetFuture extends SimpleFuture<ResultSet>
                                     case DROPPED:
                                         if (scc.columnFamily.isEmpty()) {
                                             // If that the one keyspace we are logged in, reset to null (it shouldn't really happen but ...)
-                                            if (scc.keyspace.equals(session.poolsState.keyspace))
-                                                session.poolsState.setKeyspace(null);
+                                            // Note: Actually, Cassandra doesn't do that so we don't either as this could confuse prepared statements.
+                                            // We'll add it back if CASSANDRA-5358 changes that behavior
+                                            //if (scc.keyspace.equals(session.poolsState.keyspace))
+                                            //    session.poolsState.setKeyspace(null);
                                             session.cluster.manager.refreshSchema(connection, ResultSetFuture.this, rs, null, null);
                                         } else {
                                             session.cluster.manager.refreshSchema(connection, ResultSetFuture.this, rs, scc.keyspace, null);
@@ -82,7 +101,7 @@ public class ResultSetFuture extends SimpleFuture<ResultSet>
                                 }
                                 break;
                             default:
-                                set(ResultSet.fromMessage(rm, session, connection.address));
+                                set(ResultSet.fromMessage(rm, session, info));
                                 break;
                         }
                         break;
@@ -99,6 +118,11 @@ public class ResultSetFuture extends SimpleFuture<ResultSet>
                 // If we get a bug here, the client will not get it, so better forwarding the error
                 setException(new DriverInternalError("Unexpected error while processing response from " + connection.address, e));
             }
+        }
+
+        // This is only called for internal calls, so don't bother with ExecutionInfo
+        public void onSet(Connection connection, Message.Response response) {
+            onSet(connection, response, null);
         }
 
         public void onException(Connection connection, Exception exception) {
@@ -126,7 +150,7 @@ public class ResultSetFuture extends SimpleFuture<ResultSet>
      * @throws QueryValidationException if the query if invalid (syntax error,
      * unauthorized or any other validation problem).
      */
-    public ResultSet getUninterruptibly() throws NoHostAvailableException {
+    public ResultSet getUninterruptibly() {
         boolean interrupted = false;
         try {
             while (true) {
@@ -172,7 +196,7 @@ public class ResultSetFuture extends SimpleFuture<ResultSet>
      * different from a Cassandra timeout, which is a {@code
      * QueryExecutionException}).
      */
-    public ResultSet getUninterruptibly(long timeout, TimeUnit unit) throws NoHostAvailableException, TimeoutException {
+    public ResultSet getUninterruptibly(long timeout, TimeUnit unit) throws TimeoutException {
         long start = System.nanoTime();
         long timeoutNanos = unit.toNanos(timeout);
         boolean interrupted = false;
@@ -200,13 +224,20 @@ public class ResultSetFuture extends SimpleFuture<ResultSet>
         }
     }
 
-    static void extractCauseFromExecutionException(ExecutionException e) throws NoHostAvailableException {
-        extractCause(e.getCause());
+    static void extractCauseFromExecutionException(ExecutionException e) {
+        // We could just rethrow e.getCause(). However, the cause of the ExecutionException has likely been
+        // created on the I/O thread receiving the response. Which means that the stacktrace associated
+        // with said cause will make no mention of the current thread. This is painful for say, finding
+        // out which execute() statement actually raised the exception. So instead, we re-create the
+        // exception.
+        if (e.getCause() instanceof DriverException)
+            throw ((DriverException)e.getCause()).copy();
+        else
+            throw new DriverInternalError("Unexpected exception thrown", e.getCause());
     }
 
-    static void extractCause(Throwable cause) throws NoHostAvailableException {
-        Throwables.propagateIfInstanceOf(cause, NoHostAvailableException.class);
-        Throwables.propagateIfInstanceOf(cause, DriverUncheckedException.class);
+    static void extractCause(Throwable cause) {
+        Throwables.propagateIfInstanceOf(cause, DriverException.class);
         throw new DriverInternalError("Unexpected exception thrown", cause);
     }
 

@@ -1,3 +1,18 @@
+/*
+ *      Copyright (C) 2012 DataStax Inc.
+ *
+ *   Licensed under the Apache License, Version 2.0 (the "License");
+ *   you may not use this file except in compliance with the License.
+ *   You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *   Unless required by applicable law or agreed to in writing, software
+ *   distributed under the License is distributed on an "AS IS" BASIS,
+ *   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *   See the License for the specific language governing permissions and
+ *   limitations under the License.
+ */
 package com.datastax.driver.core;
 
 import java.net.InetAddress;
@@ -7,11 +22,9 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicReference;
 
 import com.google.common.util.concurrent.Uninterruptibles;
 
-import com.datastax.driver.core.policies.*;
 import com.datastax.driver.core.exceptions.AuthenticationException;
 import com.datastax.driver.core.exceptions.DriverInternalError;
 
@@ -134,7 +147,7 @@ class Connection extends org.apache.cassandra.transport.Connection
                     throw defunct(new TransportException(address, String.format("Error initializing connection: %s", ((ErrorMessage)response).error.getMessage())));
                 case AUTHENTICATE:
                     CredentialsMessage creds = new CredentialsMessage();
-                    creds.credentials.putAll(factory.authProvider.getAuthInfos(address));
+                    creds.credentials.putAll(factory.authProvider.getAuthInfo(address));
                     Message.Response authResponse = write(creds).get();
                     switch (authResponse.type) {
                         case READY:
@@ -233,38 +246,40 @@ class Connection extends org.apache.cassandra.transport.Connection
 
         request.attach(this);
 
-        // We only support synchronous mode so far
+        ResponseHandler handler = new ResponseHandler(dispatcher, callback);
+        dispatcher.add(handler);
+        request.setStreamId(handler.streamId);
+
+        logger.trace("[{}] writing request {}", name, request);
         writer.incrementAndGet();
-        try {
+        channel.write(request).addListener(writeHandler(request, handler));
+    }
 
-            ResponseHandler handler = new ResponseHandler(dispatcher, callback);
-            dispatcher.add(handler);
-            request.setStreamId(handler.streamId);
+    private ChannelFutureListener writeHandler(final Message.Request request, final ResponseHandler handler) {
+        return new ChannelFutureListener() {
+            public void operationComplete(ChannelFuture writeFuture) {
 
-            logger.trace("[{}] writing request {}", name, request);
-            ChannelFuture writeFuture = channel.write(request);
-            writeFuture.awaitUninterruptibly();
-            if (!writeFuture.isSuccess())
-            {
-                logger.debug("[{}] Error writing request {}", name, request);
-                // Remove this handler from the dispatcher so it don't get notified of the error
-                // twice (we will fail that method already)
-                dispatcher.removeHandler(handler.streamId);
+                writer.decrementAndGet();
 
-                ConnectionException ce;
-                if (writeFuture.getCause() instanceof java.nio.channels.ClosedChannelException) {
-                    ce = new TransportException(address, "Error writing: Closed channel");
+                if (!writeFuture.isSuccess()) {
+
+                    logger.debug("[{}] Error writing request {}", name, request);
+                    // Remove this handler from the dispatcher so it don't get notified of the error
+                    // twice (we will fail that method already)
+                    dispatcher.removeHandler(handler.streamId);
+
+                    ConnectionException ce;
+                    if (writeFuture.getCause() instanceof java.nio.channels.ClosedChannelException) {
+                        ce = new TransportException(address, "Error writing: Closed channel");
+                    } else {
+                        ce = new TransportException(address, "Error writing", writeFuture.getCause());
+                    }
+                    handler.callback.onException(Connection.this, defunct(ce));
                 } else {
-                    ce = new TransportException(address, "Error writing", writeFuture.getCause());
+                    logger.trace("[{}] request sent successfully", name);
                 }
-                throw defunct(ce);
             }
-
-            logger.trace("[{}] request sent successfully", name);
-
-        } finally {
-            writer.decrementAndGet();
-        }
+        };
     }
 
     public void close() {
@@ -454,9 +469,20 @@ class Connection extends org.apache.cassandra.transport.Connection
                 iter.remove();
             }
         }
+
+        @Override
+        public void channelClosed(ChannelHandlerContext ctx, ChannelStateEvent e)
+        {
+            // If we've closed the channel server side then we don't really want to defunct the connection, but
+            // if there is remaining thread waiting on us, we still want to wake them up
+            if (isClosed)
+                errorOutAllHandler(new TransportException(address, "Channel has been closed"));
+            else
+                defunct(new TransportException(address, "Channel has been closed"));
+        }
     }
 
-    static class Future extends SimpleFuture<Message.Response> implements ResponseCallback {
+    static class Future extends SimpleFuture<Message.Response> implements RequestHandler.Callback {
 
         private final Message.Request request;
         private volatile InetAddress address;
@@ -467,6 +493,10 @@ class Connection extends org.apache.cassandra.transport.Connection
 
         public Message.Request request() {
             return request;
+        }
+
+        public void onSet(Connection connection, Message.Response response, ExecutionInfo info) {
+            onSet(connection, response);
         }
 
         public void onSet(Connection connection, Message.Response response) {

@@ -1,26 +1,37 @@
+/*
+ *      Copyright (C) 2012 DataStax Inc.
+ *
+ *   Licensed under the Apache License, Version 2.0 (the "License");
+ *   you may not use this file except in compliance with the License.
+ *   You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *   Unless required by applicable law or agreed to in writing, software
+ *   distributed under the License is distributed on an "AS IS" BASIS,
+ *   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *   See the License for the specific language governing permissions and
+ *   limitations under the License.
+ */
 package com.datastax.driver.core;
 
 import java.io.*;
 import java.net.InetAddress;
 import java.util.*;
 
-import org.junit.AfterClass;
-import org.junit.Before;
-import org.junit.BeforeClass;
-
 import com.datastax.driver.core.exceptions.*;
 import static com.datastax.driver.core.TestUtils.*;
 
 import com.google.common.io.Files;
 
-import org.apache.log4j.ConsoleAppender;
-import org.apache.log4j.Level;
-import org.apache.log4j.Logger;
-import org.apache.log4j.PatternLayout;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.testng.annotations.AfterClass;
+import org.testng.annotations.BeforeClass;
 
 public class CCMBridge {
 
-    private static final Logger logger = Logger.getLogger(CCMBridge.class);
+    private static final Logger logger = LoggerFactory.getLogger(CCMBridge.class);
 
     public static final String IP_PREFIX;
 
@@ -87,6 +98,10 @@ public class CCMBridge {
         execute("ccm stop");
     }
 
+    public void forceStop() {
+        execute("ccm stop --not-gently");
+    }
+
     public void start(int n) {
         execute("ccm node%d start", n);
     }
@@ -95,14 +110,29 @@ public class CCMBridge {
         execute("ccm node%d stop", n);
     }
 
+    public void forceStop(int n) {
+        execute("ccm node%d stop --not-gently", n);
+    }
+
     public void remove() {
         stop();
         execute("ccm remove");
     }
 
     public void bootstrapNode(int n) {
-        execute("ccm add node%d -i %s%d -j %d -b", n, IP_PREFIX, n, 7000 + 100*n);
+        bootstrapNode(n, null);
+    }
+
+    public void bootstrapNode(int n, String dc) {
+        if (dc == null)
+            execute("ccm add node%d -i %s%d -j %d -b", n, IP_PREFIX, n, 7000 + 100*n);
+        else
+            execute("ccm add node%d -i %s%d -j %d -b -d %s", n, IP_PREFIX, n, 7000 + 100*n, dc);
         execute("ccm node%d start", n);
+    }
+
+    public void decommissionNode(int n) {
+        execute("ccm node%d decommission", n);
     }
 
     private void execute(String command, Object... args) {
@@ -151,13 +181,12 @@ public class CCMBridge {
             erroredOut = true;
         }
 
-        @BeforeClass
         public static void createCluster() {
             erroredOut = false;
             schemaCreated = false;
             cassandraCluster = CCMBridge.create("test", 1);
             try {
-            	cluster = Cluster.builder().addContactPoints(IP_PREFIX + "1").build();
+                cluster = Cluster.builder().addContactPoints(IP_PREFIX + "1").build();
                 session = cluster.connect();
             } catch (NoHostAvailableException e) {
                 erroredOut = true;
@@ -167,7 +196,7 @@ public class CCMBridge {
             }
         }
 
-        @AfterClass
+        @AfterClass(groups = {"integration"})
         public static void discardCluster() {
             if (cluster != null)
                 cluster.shutdown();
@@ -183,8 +212,13 @@ public class CCMBridge {
             }
         }
 
-        @Before
-        public void maybeCreateSchema() throws NoHostAvailableException {
+        @BeforeClass(groups = {"integration"})
+        public void beforeClass() {
+        	createCluster();
+        	maybeCreateSchema();
+        }
+        
+        public void maybeCreateSchema() {
 
             try {
                 if (schemaCreated)
@@ -207,7 +241,7 @@ public class CCMBridge {
                 }
 
                 schemaCreated = true;
-            } catch (NoHostAvailableException e) {
+            } catch (DriverException e) {
                 erroredOut = true;
                 throw e;
             }
@@ -219,7 +253,7 @@ public class CCMBridge {
         public final Cluster cluster;
         public final Session session;
 
-        public final CCMBridge bridge;
+        public final CCMBridge cassandraCluster;
 
         private boolean erroredOut;
 
@@ -237,8 +271,8 @@ public class CCMBridge {
             return new CCMCluster(CCMBridge.create("test", nbNodesDC1, nbNodesDC2), builder);
         }
 
-        private CCMCluster(CCMBridge bridge, Cluster.Builder builder) {
-            this.bridge = bridge;
+        private CCMCluster(CCMBridge cassandraCluster, Cluster.Builder builder) {
+            this.cassandraCluster = cassandraCluster;
             try {
                 this.cluster = builder.addContactPoints(IP_PREFIX + "1").build();
                 this.session = cluster.connect();
@@ -258,14 +292,14 @@ public class CCMBridge {
             if (cluster != null)
                 cluster.shutdown();
 
-            if (bridge == null) {
+            if (cassandraCluster == null) {
                 logger.error("No cluster to discard");
             } else if (erroredOut) {
-                bridge.stop();
-                logger.info("Error during tests, kept C* logs in " + bridge.ccmDir);
+                cassandraCluster.stop();
+                logger.info("Error during tests, kept C* logs in " + cassandraCluster.ccmDir);
             } else {
-                bridge.remove();
-                bridge.ccmDir.delete();
+                cassandraCluster.remove();
+                cassandraCluster.ccmDir.delete();
             }
         }
     }

@@ -1,9 +1,25 @@
+/*
+ *      Copyright (C) 2012 DataStax Inc.
+ *
+ *   Licensed under the Apache License, Version 2.0 (the "License");
+ *   you may not use this file except in compliance with the License.
+ *   You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *   Unless required by applicable law or agreed to in writing, software
+ *   distributed under the License is distributed on an "AS IS" BASIS,
+ *   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *   See the License for the specific language governing permissions and
+ *   limitations under the License.
+ */
 package com.datastax.driver.core;
 
 import java.util.*;
 
-import org.junit.Test;
-import static org.junit.Assert.*;
+import org.testng.annotations.Test;
+
+import static org.testng.Assert.*;
 
 /**
  * Test we correctly process and print schema.
@@ -97,7 +113,7 @@ public class SchemaTest extends CCMBridge.PerClassSingleNodeCluster {
     // way to check we correctly handle schemas so it's probably not so bad.
     // In particular, exportAsString *does not* guarantee that you'll get
     // exactly the same string than the one used to create the table.
-    @Test
+    @Test(groups = "integration")
     public void schemaExportTest() {
 
         KeyspaceMetadata metadata = cluster.getMetadata().getKeyspace(TestUtils.SIMPLE_KEYSPACE);
@@ -105,20 +121,20 @@ public class SchemaTest extends CCMBridge.PerClassSingleNodeCluster {
         for (Map.Entry<String, String> tableEntry : cql3.entrySet()) {
             String table = tableEntry.getKey();
             String def = tableEntry.getValue();
-            assertEquals(def, stripOptions(metadata.getTable(table).exportAsString(), false));
+            assertEquals(stripOptions(metadata.getTable(table).exportAsString(), false), def);
         }
 
         for (Map.Entry<String, String> tableEntry : compact.entrySet()) {
             String table = tableEntry.getKey();
             String def = tableEntry.getValue();
-            assertEquals(def, stripOptions(metadata.getTable(table).exportAsString(), true));
+            assertEquals(stripOptions(metadata.getTable(table).exportAsString(), true), def);
         }
     }
 
     // Same remark as the preceding test
-    @Test
+    @Test(groups = "integration")
     public void schemaExportOptionsTest() {
         TableMetadata metadata = cluster.getMetadata().getKeyspace(TestUtils.SIMPLE_KEYSPACE).getTable("with_options");
-        assertEquals(withOptions, metadata.exportAsString());
+        assertEquals(metadata.exportAsString(), withOptions);
     }
 }
