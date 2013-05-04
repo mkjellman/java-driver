@@ -34,12 +34,12 @@ public abstract class TestUtils {
     public static final String CREATE_KEYSPACE_GENERIC_FORMAT = "CREATE KEYSPACE %s WITH replication = { 'class' : '%s', %s }";
 
     public static final String SIMPLE_KEYSPACE = "ks";
+    public static final String SIMPLE_TABLE = "test";
 
     public static final String CREATE_TABLE_SIMPLE_FORMAT = "CREATE TABLE %s (k text PRIMARY KEY, t text, i int, f float)";
 
     public static final String INSERT_FORMAT = "INSERT INTO %s (k, t, i, f) VALUES ('%s', '%s', %d, %f)";
     public static final String SELECT_ALL_FORMAT = "SELECT * FROM %s";
-    public static final String SELECT_WHERE_FORMAT = "SELECT * FROM %s WHERE %s";
 
     public static BoundStatement setBoundValue(BoundStatement bs, String name, DataType type, Object value) {
         switch (type.getName()) {
@@ -291,12 +291,24 @@ public abstract class TestUtils {
     // Wait for a node to be up and running
     // This is used because there is some delay between when a node has been
     // added through ccm and when it's actually available for querying
+    public static void waitFor(String node, Cluster cluster) {
+        waitFor(node, cluster, 20, false, false);
+    }
+
     public static void waitFor(String node, Cluster cluster, int maxTry) {
         waitFor(node, cluster, maxTry, false, false);
     }
 
+    public static void waitForDown(String node, Cluster cluster) {
+        waitFor(node, cluster, 20, true, false);
+    }
+
     public static void waitForDown(String node, Cluster cluster, int maxTry) {
         waitFor(node, cluster, maxTry, true, false);
+    }
+
+    public static void waitForDecommission(String node, Cluster cluster) {
+        waitFor(node, cluster, 20, true, true);
     }
 
     public static void waitForDecommission(String node, Cluster cluster, int maxTry) {
@@ -304,6 +316,14 @@ public abstract class TestUtils {
     }
 
     private static void waitFor(String node, Cluster cluster, int maxTry, boolean waitForDead, boolean waitForOut) {
+        if (waitForDead || waitForOut)
+            if (waitForDead)
+                logger.info("Waiting for stopped node: " + node);
+            else if (waitForOut)
+                logger.info("Waiting for decommissioned node: " + node);
+        else
+            logger.info("Waiting for upcoming node: " + node);
+
         // In the case where the we've killed the last node in the cluster, if we haven't
         // tried doing an actual query, the driver won't realize that last node is dead until
         // keep alive kicks in, but that's a fairly long time. So we cheat and trigger a force
@@ -334,8 +354,8 @@ public abstract class TestUtils {
                     return;
                 } else {
                     // logging it because this give use the timestamp of when this happens
-                    logger.info(node + " is not " + (waitForDead ? "DOWN" : "UP") + " and is still part of the cluster after " + maxTry + "s");
-                    throw new IllegalStateException(node + " is not " + (waitForDead ? "DOWN" : "UP") + " and is still part of the cluster after " + maxTry + "s");
+                    logger.info(node + " is not " + (waitForDead ? "DOWN" : "UP") + " after " + maxTry + "s");
+                    throw new IllegalStateException(node + " is not " + (waitForDead ? "DOWN" : "UP") + " after " + maxTry + "s");
                 }
             }
         }
@@ -348,8 +368,7 @@ public abstract class TestUtils {
         }
     }
 
-    private static boolean testHost(Host host, boolean testForDown)
-    {
+    private static boolean testHost(Host host, boolean testForDown) {
         return testForDown ? !host.getMonitor().isUp() : host.getMonitor().isUp();
     }
 }

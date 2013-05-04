@@ -50,10 +50,11 @@ import org.slf4j.LoggerFactory;
  *       // do something ...
  * </pre>
  * <p>
- * A cluster object maintains a permanent connection to one of the cluster node
- * that it uses solely to maintain information on the state and current
+ * A cluster object maintains a permanent connection to one of the cluster nodes
+ * which it uses solely to maintain information on the state and current
  * topology of the cluster. Using the connection, the driver will discover all
- * the nodes composing the cluster as well as new nodes joining the cluster.
+ * the nodes currently in the cluster as well as new nodes joining the cluster
+ * subsequently.
  */
 public class Cluster {
 
@@ -81,9 +82,9 @@ public class Cluster {
      * @throws NoHostAvailableException if no host amongst the contact points
      * can be reached.
      * @throws IllegalArgumentException if the list of contact points provided
-     * by {@code initiazer} is empty or if not all those contact points have the same port.
-     * @throws AuthenticationException if while contacting the initial
-     * contact points an authencation error occurs.
+     * by {@code initializer} is empty or if not all those contact points have the same port.
+     * @throws AuthenticationException if an authentication error occurs
+     * while contacting the initial contact points.
      */
     public static Cluster buildFrom(Initializer initializer) {
         List<InetAddress> contactPoints = initializer.getContactPoints();
@@ -96,7 +97,7 @@ public class Cluster {
     /**
      * Creates a new {@link Cluster.Builder} instance.
      * <p>
-     * This is a shortcut for {@code new Cluster.Builder()}.
+     * This is a convenenience method for {@code new Cluster.Builder()}.
      *
      * @return the new cluster builder.
      */
@@ -114,7 +115,7 @@ public class Cluster {
     }
 
     /**
-     * Creates a new session on this cluster and sets a keyspace to use.
+     * Creates a new session on this cluster and sets the keyspace to the provided one.
      *
      * @param keyspace The name of the keyspace to use for the created
      * {@code Session}.
@@ -133,7 +134,7 @@ public class Cluster {
     /**
      * Returns read-only metadata on the connected cluster.
      * <p>
-     * This includes the know nodes (with their status as seen by the driver)
+     * This includes the known nodes with their status as seen by the driver,
      * as well as the schema definitions.
      *
      * @return the cluster metadata.
@@ -164,27 +165,52 @@ public class Cluster {
     }
 
     /**
-     * Shutdown this cluster instance.
+     * Shuts down this cluster instance.
+     *
+     * This closes all connections from all the sessions of this {@code
+     * Cluster} instance and reclaims all resources used by it.
+     * <p>
+     * This method waits indefinitely for the driver to shut down.
+     * <p>
+     * This method has no effect if the cluster was already shut down.
+     */
+    public void shutdown() {
+        shutdown(Long.MAX_VALUE, TimeUnit.MILLISECONDS);
+    }
+
+    /**
+     * Shutdown this cluster instance, only waiting a definite amount of time.
      *
      * This closes all connections from all the sessions of this {@code
      * Cluster} instance and reclaim all resources used by it.
      * <p>
-     * This method has no effect if the cluster was already shutdown.
+     * Note that this method is not thread safe in the sense that if another
+     * shutdown is perform in parallel, it might return {@code true} even if
+     * the instance is not yet fully shutdown.
+     *
+     * @param timeout how long to wait for the cluster instance to shutdown.
+     * @param unit the unit for the timeout.
+     * @return {@code true} if the instance has been properly shutdown within
+     * the {@code timeout}, {@code false} otherwise.
      */
-    public void shutdown() {
-        manager.shutdown();
+    public boolean shutdown(long timeout, TimeUnit unit) {
+        try {
+            return manager.shutdown(timeout, unit);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        }
     }
 
     /**
      * Initializer for {@link Cluster} instances.
      * <p>
      * If you want to create a new {@code Cluster} instance programmatically,
-     * then it is advised to use {@link Cluster.Builder} (obtained through the
-     * {@link Cluster#builder} method).
+     * then it is advised to use {@link Cluster.Builder} which can be obtained from the
+     * {@link Cluster#builder} method.
      * <p>
      * But it is also possible to implement a custom {@code Initializer} that
-     * retrieve initialization from a web-service or from a configuration file
-     * for instance.
+     * retrieves initialization from a web-service or from a configuration file.
      */
     public interface Initializer {
 
@@ -200,8 +226,8 @@ public class Cluster {
          * The configuration to use for the new cluster.
          * <p>
          * Note that some configuration can be modified after the cluster
-         * initialization but some other cannot. In particular, the ones that
-         * cannot be change afterwards includes:
+         * initialization but some others cannot. In particular, the ones that
+         * cannot be changed afterwards includes:
          * <ul>
          *   <li>the port use to connect to Cassandra nodes (see {@link ProtocolOptions}).</li>
          *   <li>the policies used (see {@link Policies}).</li>
@@ -257,8 +283,8 @@ public class Cluster {
          * to discover the cluster topology. Only one contact point is required
          * (the driver will retrieve the address of the other nodes
          * automatically), but it is usually a good idea to provide more than
-         * one contact point, as if that unique contact point is not available,
-         * the driver won't be able to initialize itself correctly.
+         * one contact point, because if that single contact point is unavailable,
+         * the driver cannot initialize itself correctly.
          *
          * @param address the address of the node to connect to
          * @return this Builder
@@ -278,7 +304,7 @@ public class Cluster {
         }
 
         /**
-         * Add contact points.
+         * Adds contact points.
          *
          * See {@link Builder#addContactPoint} for more details on contact
          * points.
@@ -300,7 +326,7 @@ public class Cluster {
         }
 
         /**
-         * Add contact points.
+         * Adds contact points.
          *
          * See {@link Builder#addContactPoint} for more details on contact
          * points.
@@ -317,7 +343,7 @@ public class Cluster {
         }
 
         /**
-         * Configure the load balancing policy to use for the new cluster.
+         * Configures the load balancing policy to use for the new cluster.
          * <p>
          * If no load balancing policy is set through this method,
          * {@link Policies#DEFAULT_LOAD_BALANCING_POLICY} will be used instead.
@@ -331,7 +357,7 @@ public class Cluster {
         }
 
         /**
-         * Configure the reconnection policy to use for the new cluster.
+         * Configures the reconnection policy to use for the new cluster.
          * <p>
          * If no reconnection policy is set through this method,
          * {@link Policies#DEFAULT_RECONNECTION_POLICY} will be used instead.
@@ -345,7 +371,7 @@ public class Cluster {
         }
 
         /**
-         * Configure the retry policy to use for the new cluster.
+         * Configures the retry policy to use for the new cluster.
          * <p>
          * If no retry policy is set through this method,
          * {@link Policies#DEFAULT_RETRY_POLICY} will be used instead.
@@ -359,7 +385,7 @@ public class Cluster {
         }
 
         /**
-         * Use the provided {@code AuthInfoProvider} to connect to Cassandra hosts.
+         * Uses the provided {@code AuthInfoProvider} to connect to Cassandra hosts.
          * <p>
          * This is optional if the Cassandra cluster has been configured to not
          * require authentication (the default).
@@ -386,7 +412,7 @@ public class Cluster {
         }
 
         /**
-         * Disable metrics collection for the created cluster (metrics are
+         * Disables metrics collection for the created cluster (metrics are
          * enabled by default otherwise).
          *
          * @return this builder
@@ -397,7 +423,7 @@ public class Cluster {
         }
 
         /**
-         * The pooling options used by this builder.
+         * Return the pooling options used by this builder.
          *
          * @return the pooling options that will be used by this builder. You
          * can use the returned object to define the initial pooling options
@@ -408,7 +434,7 @@ public class Cluster {
         }
 
         /**
-         * The socket options used by this builder.
+         * Returns the socket options used by this builder.
          *
          * @return the socket options that will be used by this builder. You
          * can use the returned object to define the initial socket options
@@ -421,7 +447,7 @@ public class Cluster {
         /**
          * The configuration that will be used for the new cluster.
          * <p>
-         * You <b>should not</b> modify this object directly as change made
+         * You <b>should not</b> modify this object directly because changes made
          * to the returned object may not be used by the cluster build.
          * Instead, you should use the other methods of this {@code Builder}.
          *
@@ -442,17 +468,17 @@ public class Cluster {
         }
 
         /**
-         * Build the cluster with the configured set of initial contact points
+         * Builds the cluster with the configured set of initial contact points
          * and policies.
          *
-         * This is a shorthand for {@code Cluster.buildFrom(this)}.
+         * This is a convenience method for {@code Cluster.buildFrom(this)}.
          *
-         * @return the newly build Cluster instance.
+         * @return the newly built Cluster instance.
          *
          * @throws NoHostAvailableException if none of the contact points
          * provided can be reached.
-         * @throws AuthenticationException if while contacting the initial
-         * contact points an authencation error occurs.
+         * @throws AuthenticationException if an authentication error occurs.
+         * while contacting the initial contact points
          */
         public Cluster build() {
             return Cluster.buildFrom(this);
@@ -461,6 +487,10 @@ public class Cluster {
 
     private static ThreadFactory threadFactory(String nameFormat) {
         return new ThreadFactoryBuilder().setNameFormat(nameFormat).build();
+    }
+
+    static long timeSince(long start, TimeUnit unit) {
+        return unit.convert(System.currentTimeMillis() - start, TimeUnit.MILLISECONDS);
     }
 
     /**
@@ -486,6 +516,8 @@ public class Cluster {
         final ConvictionPolicy.Factory convictionPolicyFactory = new ConvictionPolicy.Simple.Factory();
 
         final ScheduledExecutorService reconnectionExecutor = Executors.newScheduledThreadPool(2, threadFactory("Reconnection-%d"));
+        // scheduledTasksExecutor is used to process C* notifications. So having it mono-threaded ensures notifications are
+        // applied in the order received.
         final ScheduledExecutorService scheduledTasksExecutor = Executors.newScheduledThreadPool(1, threadFactory("Scheduled Tasks-%d"));
 
         final ExecutorService executor = Executors.newCachedThreadPool(threadFactory("Cassandra Java Driver worker-%d"));
@@ -515,7 +547,11 @@ public class Cluster {
             try {
                 this.controlConnection.connect();
             } catch (NoHostAvailableException e) {
-                shutdown();
+                try {
+                    shutdown(0, TimeUnit.MILLISECONDS);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                }
                 throw e;
             }
         }
@@ -537,24 +573,36 @@ public class Cluster {
             return session;
         }
 
-        private void shutdown() {
+        private boolean shutdown(long timeout, TimeUnit unit) throws InterruptedException {
+
             if (!isShutdown.compareAndSet(false, true))
-                return;
+                return true;
 
             logger.debug("Shutting down");
 
-            controlConnection.shutdown();
+            long start = System.currentTimeMillis();
+            boolean success = true;
+
+            success &= controlConnection.shutdown(timeout, unit);
 
             for (Session session : sessions)
-                session.shutdown();
+                success &= session.shutdown(timeout - timeSince(start, unit), unit);
 
-            reconnectionExecutor.shutdownNow();
-            scheduledTasksExecutor.shutdownNow();
-            executor.shutdownNow();
-            connectionFactory.shutdown();
+            reconnectionExecutor.shutdown();
+            scheduledTasksExecutor.shutdown();
+            executor.shutdown();
+
+            success &= connectionFactory.shutdown(timeout - timeSince(start, unit), unit);
 
             if (metrics != null)
                 metrics.shutdown();
+
+            // Note that it's on purpose that we shutdown everything *even* if the timeout
+            // is reached early
+            return success
+                && reconnectionExecutor.awaitTermination(timeout - timeSince(start, unit), unit)
+                && scheduledTasksExecutor.awaitTermination(timeout - timeSince(start, unit), unit)
+                && executor.awaitTermination(timeout - timeSince(start, unit), unit);
         }
 
         public void onUp(Host host) {
@@ -568,7 +616,7 @@ public class Cluster {
             try {
                 prepareAllQueries(host);
             } catch (InterruptedException e) {
-                Thread.interrupted();
+                Thread.currentThread().interrupt();
                 // Don't propagate because we don't want to prevent other listener to run
             }
 
@@ -593,7 +641,7 @@ public class Cluster {
 
                 protected void onReconnection(Connection connection) {
                     logger.debug("Successful reconnection to {}, setting host UP", host);
-                    host.getMonitor().reset();
+                    host.getMonitor().setUp();
                 }
 
                 protected boolean onConnectionException(ConnectionException e, long nextDelayMs) {
@@ -616,7 +664,7 @@ public class Cluster {
             try {
                 prepareAllQueries(host);
             } catch (InterruptedException e) {
-                Thread.interrupted();
+                Thread.currentThread().interrupt();
                 // Don't propagate because we don't want to prevent other listener to run
             }
 
@@ -721,7 +769,7 @@ public class Cluster {
                         }
                     }
                 } finally {
-                    connection.close();
+                    connection.close(0, TimeUnit.MILLISECONDS);
                 }
             } catch (ConnectionException e) {
                 // Ignore, not a big deal
@@ -781,8 +829,8 @@ public class Cluster {
 
             // When handle is called, the current thread is a network I/O  thread, and we don't want to block
             // it (typically addHost() will create the connection pool to the new node, which can take time)
-            // Besides, events are usually sent a bit too early (since they're triggered once gossip is up,
-            // but that before the client-side server is up) so adds a 1 second delay.
+            // Besides, up events are usually sent a bit too early (since they're triggered once gossip is up,
+            // but that before the client-side server is up) so adds a 1 second delay in that case.
             // TODO: this delay is honestly quite random. We should do something on the C* side to fix that.
             scheduledTasksExecutor.schedule(new Runnable() {
                 public void run() {
@@ -805,18 +853,23 @@ public class Cluster {
                             Event.StatusChange stc = (Event.StatusChange)event;
                             switch (stc.status) {
                                 case UP:
-                                    Host host = metadata.getHost(stc.node.getAddress());
-                                    if (host == null) {
+                                    Host hostUp = metadata.getHost(stc.node.getAddress());
+                                    if (hostUp == null) {
                                         // first time we heard about that node apparently, add it
                                         addHost(stc.node.getAddress(), true);
                                     } else {
-                                        onUp(host);
+                                        hostUp.getMonitor().setUp();
                                     }
                                     break;
                                 case DOWN:
-                                    // Ignore down event. Connection will realized a node is dead quicly enough when they write to
-                                    // it, and there is no point in taking the risk of marking the node down mistakenly because we
-                                    // didn't received the event in a timely fashion
+                                    // Note that there is a slight risk we can receive the event late and thus
+                                    // mark the host down even though we already had reconnected successfully.
+                                    // But it is unlikely, and don't have too much consequence since we'll try reconnecting
+                                    // right away, so we favor the detection to make the Host.isUp method more reliable.
+                                    Host hostDown = metadata.getHost(stc.node.getAddress());
+                                    if (hostDown != null) {
+                                        hostDown.getMonitor().setDown();
+                                    }
                                     break;
                             }
                             break;
@@ -845,7 +898,21 @@ public class Cluster {
                             break;
                     }
                 }
-            }, 1, TimeUnit.SECONDS);
+            }, delayForEvent(event), TimeUnit.SECONDS);
+        }
+
+        private int delayForEvent(Event event) {
+            switch (event.type) {
+                case TOPOLOGY_CHANGE:
+                    // Could probably be 0 for REMOVED_NODE but it's inconsequential
+                    return 1;
+                case STATUS_CHANGE:
+                    Event.StatusChange stc = (Event.StatusChange)event;
+                    if (stc.status == Event.StatusChange.Status.UP)
+                        return 1;
+                    break;
+            }
+            return 0;
         }
 
     }

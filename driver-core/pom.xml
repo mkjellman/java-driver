@@ -13,13 +13,12 @@
      See the License for the specific language governing permissions and
      limitations under the License.
 -->
-<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-  xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd">
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd">
   <modelVersion>4.0.0</modelVersion>
   <parent>
     <groupId>com.datastax.cassandra</groupId>
     <artifactId>cassandra-driver-parent</artifactId>
-    <version>1.0.0-beta2-SNAPSHOT</version>
+    <version>1.0.0-rc2-SNAPSHOT</version>
   </parent>
   <artifactId>cassandra-driver-core</artifactId>
   <packaging>jar</packaging>
@@ -43,14 +42,14 @@
     <dependency>
       <groupId>org.apache.cassandra</groupId>
       <artifactId>cassandra-thrift</artifactId>
-      <version>1.2.3</version>
+      <version>${cassandra-dependency.version}</version>
     </dependency>
 
     <dependency>
       <groupId>org.apache.thrift</groupId>
       <artifactId>libthrift</artifactId>
       <!-- Leave at 0.7.0 for Cassandra compatibility -->
-      <version>0.7.0</version>
+      <version>[0.7.0]</version>
       <exclusions>
         <exclusion>
           <groupId>org.slf4j</groupId>
@@ -63,7 +62,7 @@
       <groupId>org.codehaus.jackson</groupId>
       <artifactId>jackson-core-asl</artifactId>
       <!-- Leave at 1.9.2 for Cassandra compatibility -->
-      <version>1.9.2</version>
+      <version>[1.9.2]</version>
     </dependency>
 
     <dependency>
@@ -92,7 +91,6 @@
       <id>default</id>
       <properties>
         <env>default</env>
-        <cassandra.version>1.2.3</cassandra.version>
       </properties>
       <activation>
         <activeByDefault>true</activeByDefault>
@@ -120,7 +118,6 @@
       <id>integration</id>
       <properties>
         <env>default</env>
-        <cassandra.version>1.2.3</cassandra.version>
       </properties>
       <build>
         <plugins>
@@ -145,7 +142,6 @@
       <id>doc</id>
       <properties>
         <env>default</env>
-        <cassandra.version>1.2.3</cassandra.version>
       </properties>
       <build>
         <plugins>

@@ -103,20 +103,31 @@ public class CCMBridge {
     }
 
     public void start(int n) {
+        logger.info("Starting: " + IP_PREFIX + n);
         execute("ccm node%d start", n);
     }
 
     public void stop(int n) {
+        logger.info("Stopping: " + IP_PREFIX + n);
         execute("ccm node%d stop", n);
     }
 
     public void forceStop(int n) {
+        logger.info("Force stopping: " + IP_PREFIX + n);
         execute("ccm node%d stop --not-gently", n);
     }
 
     public void remove() {
         stop();
         execute("ccm remove");
+    }
+
+    public void ring() {
+        ring(1);
+    }
+
+    public void ring(int n) {
+        executeAndPrint("ccm node%d ring", n);
     }
 
     public void bootstrapNode(int n) {
@@ -157,6 +168,26 @@ public class CCMBridge {
                     line = errReader.readLine();
                 }
                 throw new RuntimeException();
+            }
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        } catch (InterruptedException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private void executeAndPrint(String command, Object... args) {
+        try {
+            String fullCommand = String.format(command, args) + " --config-dir=" + ccmDir;
+            logger.debug("Executing: " + fullCommand);
+            Process p = runtime.exec(fullCommand, null, CASSANDRA_DIR);
+            int retValue = p.waitFor();
+
+            BufferedReader outReaderOutput = new BufferedReader(new InputStreamReader(p.getInputStream()));
+            String line = outReaderOutput.readLine();
+            while (line != null) {
+                System.out.println(line);
+                line = outReaderOutput.readLine();
             }
         } catch (IOException e) {
             throw new RuntimeException(e);

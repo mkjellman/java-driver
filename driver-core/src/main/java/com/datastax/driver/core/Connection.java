@@ -35,6 +35,7 @@ import org.apache.cassandra.transport.messages.*;
 import org.jboss.netty.bootstrap.ClientBootstrap;
 import org.jboss.netty.channel.*;
 import org.jboss.netty.channel.group.ChannelGroup;
+import org.jboss.netty.channel.group.ChannelGroupFuture;
 import org.jboss.netty.channel.group.DefaultChannelGroup;
 import org.jboss.netty.channel.socket.nio.NioClientSocketChannelFactory;
 import org.slf4j.Logger;
@@ -153,7 +154,7 @@ class Connection extends org.apache.cassandra.transport.Connection
                         case READY:
                             break;
                         case ERROR:
-                            throw new AuthenticationException(address, (((ErrorMessage)response).error).getMessage());
+                            throw new AuthenticationException(address, (((ErrorMessage)authResponse).error).getMessage());
                         default:
                             throw defunct(new TransportException(address, String.format("Unexpected %s response message from server to a CREDENTIALS message", authResponse.type)));
                     }
@@ -177,6 +178,8 @@ class Connection extends org.apache.cassandra.transport.Connection
     }
 
     ConnectionException defunct(ConnectionException e) {
+        if (logger.isDebugEnabled())
+            logger.debug("Defuncting connection to " + address, e);
         exception = e;
         isDefunct = true;
         dispatcher.errorOutAllHandler(e);
@@ -283,8 +286,16 @@ class Connection extends org.apache.cassandra.transport.Connection
     }
 
     public void close() {
+        try {
+            close(0, TimeUnit.MILLISECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    public boolean close(long timeout, TimeUnit unit) throws InterruptedException {
         if (isClosed)
-            return;
+            return true;
 
         // Note: there is no guarantee only one thread will reach that point, but executing this
         // method multiple time is harmless. If the latter change, we'll have to CAS isClosed to
@@ -295,13 +306,13 @@ class Connection extends org.apache.cassandra.transport.Connection
         // Make sure all new writes are rejected
         isClosed = true;
 
+        long start = System.currentTimeMillis();
         if (!isDefunct) {
             // Busy waiting, we just wait for request to be fully written, shouldn't take long
-            while (writer.get() > 0)
-                Uninterruptibles.sleepUninterruptibly(10, TimeUnit.MILLISECONDS);
+            while (writer.get() > 0 && Cluster.timeSince(start, unit) < timeout)
+                Uninterruptibles.sleepUninterruptibly(1, unit);
         }
-
-        channel.close().awaitUninterruptibly();
+        return channel.close().await(timeout - unit.convert(System.currentTimeMillis() - start, TimeUnit.MILLISECONDS), unit);
         // Note: we must not call releaseExternalResources on the bootstrap, because this shutdown the executors, which are shared
     }
 
@@ -327,12 +338,12 @@ class Connection extends org.apache.cassandra.transport.Connection
         private final ChannelFactory channelFactory = new NioClientSocketChannelFactory(bossExecutor, workerExecutor);
         private final ChannelGroup allChannels = new DefaultChannelGroup();
 
-
         private final ConcurrentMap<Host, AtomicInteger> idGenerators = new ConcurrentHashMap<Host, AtomicInteger>();
         public final DefaultResponseHandler defaultHandler;
         public final Configuration configuration;
 
         public final AuthInfoProvider authProvider;
+        private volatile boolean isShutdown;
 
         public Factory(Cluster.Manager manager, AuthInfoProvider authProvider) {
             this(manager, manager.configuration, authProvider);
@@ -357,6 +368,10 @@ class Connection extends org.apache.cassandra.transport.Connection
          */
         public Connection open(Host host) throws ConnectionException, InterruptedException {
             InetAddress address = host.getAddress();
+
+            if (isShutdown)
+                throw new ConnectionException(address, "Connection factory is shut down");
+
             String name = address.toString() + "-" + getIdGenerator(host).getAndIncrement();
             return new Connection(name, address, this);
         }
@@ -400,9 +415,18 @@ class Connection extends org.apache.cassandra.transport.Connection
             return b;
         }
 
-        public void shutdown() {
-            allChannels.close();
+        public boolean shutdown(long timeout, TimeUnit unit) throws InterruptedException {
+            // Make sure we skip creating connection from now on.
+            isShutdown = true;
+
+            long start = System.currentTimeMillis();
+            ChannelGroupFuture future = allChannels.close();
+
             channelFactory.releaseExternalResources();
+
+            return future.await(timeout, unit)
+                && bossExecutor.awaitTermination(timeout - Cluster.timeSince(start, unit), unit)
+                && workerExecutor.awaitTermination(timeout - Cluster.timeSince(start, unit), unit);
         }
     }
 

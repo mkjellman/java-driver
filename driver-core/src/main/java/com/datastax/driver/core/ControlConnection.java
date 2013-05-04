@@ -56,7 +56,7 @@ class ControlConnection implements Host.StateListener {
     private static final String SELECT_PEERS = "SELECT peer, data_center, rack, tokens, rpc_address FROM system.peers";
     private static final String SELECT_LOCAL = "SELECT cluster_name, data_center, rack, tokens, partitioner FROM system.local WHERE key='local'";
 
-    private static final String SELECT_SCHEMA_PEERS = "SELECT rpc_address, schema_version FROM system.peers";
+    private static final String SELECT_SCHEMA_PEERS = "SELECT peer, rpc_address, schema_version FROM system.peers";
     private static final String SELECT_SCHEMA_LOCAL = "SELECT schema_version FROM system.local WHERE key='local'";
 
     private final AtomicReference<Connection> connectionRef = new AtomicReference<Connection>();
@@ -64,14 +64,17 @@ class ControlConnection implements Host.StateListener {
     private final Cluster.Manager cluster;
     private final LoadBalancingPolicy balancingPolicy;
 
-    private final ReconnectionPolicy reconnectionPolicy = new ExponentialReconnectionPolicy(2 * 1000, 5 * 60 * 1000);
+    private final ReconnectionPolicy reconnectionPolicy;
     private final AtomicReference<ScheduledFuture> reconnectionAttempt = new AtomicReference<ScheduledFuture>();
 
     private volatile boolean isShutdown;
 
     public ControlConnection(Cluster.Manager manager, Metadata metadata) {
         this.cluster = manager;
-        this.balancingPolicy = new RoundRobinPolicy();
+
+        // We use the configured reconnection policy and balancing policy
+        this.reconnectionPolicy = manager.configuration.getPolicies().getReconnectionPolicy();
+        this.balancingPolicy = manager.configuration.getPolicies().getLoadBalancingPolicy();
         this.balancingPolicy.init(manager.getCluster(), metadata.allHosts());
     }
 
@@ -83,11 +86,10 @@ class ControlConnection implements Host.StateListener {
         setNewConnection(reconnectInternal());
     }
 
-    public void shutdown() {
+    public boolean shutdown(long timeout, TimeUnit unit) throws InterruptedException {
         isShutdown = true;
         Connection connection = connectionRef.get();
-        if (connection != null)
-            connection.close();
+        return connection != null ? connection.close(timeout, unit) : true;
     }
 
     private void reconnect() {
@@ -124,11 +126,34 @@ class ControlConnection implements Host.StateListener {
         }
     }
 
+    private void signalError() {
+
+        // Try just signaling the host monitor, as this will trigger a reconnect as part to marking the host down.
+        Connection connection = connectionRef.get();
+        if (connection != null && connection.isDefunct()) {
+            Host host = cluster.metadata.getHost(connection.address);
+            // Host might be null in the case the host has been removed, but it means this has
+            // been reported already so it's fine.
+            if (host != null) {
+                host.getMonitor().signalConnectionFailure(connection.lastException());
+                return;
+            }
+        }
+
+        // If the connection is not defunct, or the host has left, just reconnect manually
+        reconnect();
+    }
+
     private void setNewConnection(Connection newConnection) {
         logger.debug("[Control connection] Successfully connected to {}", newConnection.address);
         Connection old = connectionRef.getAndSet(newConnection);
-        if (old != null && !old.isClosed())
-            old.close();
+        if (old != null && !old.isClosed()) {
+            try {
+                old.close(0, TimeUnit.MILLISECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
     }
 
     private Connection reconnectInternal() {
@@ -206,13 +231,13 @@ class ControlConnection implements Host.StateListener {
             refreshSchema(connectionRef.get(), keyspace, table, cluster);
         } catch (ConnectionException e) {
             logger.debug("[Control connection] Connection error while refeshing schema ({})", e.getMessage());
-            reconnect();
+            signalError();
         } catch (ExecutionException e) {
             logger.error("[Control connection] Unexpected error while refeshing schema", e);
-            reconnect();
+            signalError();
         } catch (BusyConnectionException e) {
             logger.debug("[Control connection] Connection is busy, reconnecting");
-            reconnect();
+            signalError();
         }
     }
 
@@ -250,13 +275,13 @@ class ControlConnection implements Host.StateListener {
             refreshNodeListAndTokenMap(c);
         } catch (ConnectionException e) {
             logger.debug("[Control connection] Connection error while refeshing node list and token map ({})", e.getMessage());
-            reconnect();
+            signalError();
         } catch (ExecutionException e) {
             logger.error("[Control connection] Unexpected error while refeshing node list and token map", e);
-            reconnect();
+            signalError();
         } catch (BusyConnectionException e) {
             logger.debug("[Control connection] Connection is busy, reconnecting");
-            reconnect();
+            signalError();
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             logger.debug("[Control connection] Interrupted while refreshing node list and token map, skipping it.");
@@ -394,12 +419,19 @@ class ControlConnection implements Host.StateListener {
     public void onDown(Host host) {
         balancingPolicy.onDown(host);
 
-        // If that's the host we're connected to, and we haven't yet schedul a reconnection, pre-emptively start one
+        // If that's the host we're connected to, and we haven't yet schedule a reconnection, preemptively start one
         Connection current = connectionRef.get();
         if (logger.isTraceEnabled())
             logger.trace("[Control connection] {} is down, currently connected to {}", host, current == null ? "nobody" : current.address);
-        if (current != null && current.address.equals(host.getAddress()) && reconnectionAttempt.get() == null)
-            reconnect();
+        if (current != null && current.address.equals(host.getAddress()) && reconnectionAttempt.get() == null) {
+            // We might very be on an I/O thread when we reach this so we should not do that on this thread.
+            // Besides, there is no reason to block the onDown method while we try to reconnect.
+            cluster.executor.submit(new Runnable() {
+                public void run() {
+                    reconnect();
+                }
+            });
+        }
     }
 
     public void onAdd(Host host) {
