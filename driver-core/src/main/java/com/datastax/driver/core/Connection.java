@@ -22,8 +22,12 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLEngine;
 
+import com.google.common.collect.ImmutableMap;
 import com.google.common.util.concurrent.Uninterruptibles;
+import com.google.common.util.concurrent.ThreadFactoryBuilder;
 
 import com.datastax.driver.core.exceptions.AuthenticationException;
 import com.datastax.driver.core.exceptions.DriverInternalError;
@@ -38,6 +42,11 @@ import org.jboss.netty.channel.group.ChannelGroup;
 import org.jboss.netty.channel.group.ChannelGroupFuture;
 import org.jboss.netty.channel.group.DefaultChannelGroup;
 import org.jboss.netty.channel.socket.nio.NioClientSocketChannelFactory;
+import org.jboss.netty.handler.ssl.SslHandler;
+import org.jboss.netty.util.HashedWheelTimer;
+import org.jboss.netty.util.Timeout;
+import org.jboss.netty.util.TimerTask;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -58,7 +67,10 @@ class Connection extends org.apache.cassandra.transport.Connection
     private static final String CQL_VERSION = "3.0.0";
 
     private static final org.apache.cassandra.transport.Connection.Tracker EMPTY_TRACKER = new org.apache.cassandra.transport.Connection.Tracker() {
+        @Override
         public void addConnection(Channel ch, org.apache.cassandra.transport.Connection connection) {}
+
+        @Override
         public void closeAll() {}
     };
 
@@ -95,7 +107,10 @@ class Connection extends org.apache.cassandra.transport.Connection
         this.name = name;
 
         ClientBootstrap bootstrap = factory.newBootstrap();
-        bootstrap.setPipelineFactory(new PipelineFactory(this));
+        if (factory.configuration.getProtocolOptions().sslOptions == null)
+            bootstrap.setPipelineFactory(new PipelineFactory(this));
+        else
+            bootstrap.setPipelineFactory(new SecurePipelineFactory(this, factory.configuration.getProtocolOptions().sslOptions));
 
         ChannelFuture future = bootstrap.connect(new InetSocketAddress(address, factory.getPort()));
 
@@ -120,25 +135,25 @@ class Connection extends org.apache.cassandra.transport.Connection
     }
 
     private static String extractMessage(Throwable t) {
-        if (t == null || t.getMessage().isEmpty())
-            return "";
-        return " (" + t.getMessage() + ")";
+        String msg = t == null || t.getMessage() == null || t.getMessage().isEmpty()
+                   ? t.toString()
+                   : t.getMessage();
+        return " (" + msg + ")";
     }
 
     private void initializeTransport() throws ConnectionException, InterruptedException {
 
         // TODO: we will need to get fancy about handling protocol version at
         // some point, but keep it simple for now.
-        Map<String, String> options = new HashMap<String, String>() {{
-            put(StartupMessage.CQL_VERSION, CQL_VERSION);
-        }};
+        ImmutableMap.Builder<String, String> options = new ImmutableMap.Builder<String, String>();
+        options.put(StartupMessage.CQL_VERSION, CQL_VERSION);
         ProtocolOptions.Compression compression = factory.configuration.getProtocolOptions().getCompression();
         if (compression != ProtocolOptions.Compression.NONE)
         {
             options.put(StartupMessage.COMPRESSION, compression.toString());
             setCompressor(compression.compressor());
         }
-        StartupMessage startup = new StartupMessage(options);
+        StartupMessage startup = new StartupMessage(options.build());
         try {
             Message.Response response = write(startup).get();
             switch (response.type) {
@@ -165,7 +180,7 @@ class Connection extends org.apache.cassandra.transport.Connection
         } catch (BusyConnectionException e) {
             throw new DriverInternalError("Newly created connection should not be busy");
         } catch (ExecutionException e) {
-            throw defunct(new ConnectionException(address, "Unexpected error during transport initialization", e.getCause()));
+            throw defunct(new ConnectionException(address, String.format("Unexpected error during transport initialization (%s)", e.getCause()), e.getCause()));
         }
     }
 
@@ -183,6 +198,7 @@ class Connection extends org.apache.cassandra.transport.Connection
         exception = e;
         isDefunct = true;
         dispatcher.errorOutAllHandler(e);
+        close();
         return e;
     }
 
@@ -199,7 +215,10 @@ class Connection extends org.apache.cassandra.transport.Connection
 
         try {
             logger.trace("[{}] Setting keyspace {}", name, keyspace);
-            Message.Response response = Uninterruptibles.getUninterruptibly(write(new QueryMessage("USE \"" + keyspace + "\"", ConsistencyLevel.DEFAULT_CASSANDRA_CL)));
+            long timeout = factory.getConnectTimeoutMillis();
+            // Note: we quote the keyspace below, because the name is the one coming from Cassandra, so it's in the right case already
+            Future future = write(new QueryMessage("USE \"" + keyspace + "\"", ConsistencyLevel.DEFAULT_CASSANDRA_CL));
+            Message.Response response = Uninterruptibles.getUninterruptibly(future, timeout, TimeUnit.MILLISECONDS);
             switch (response.type) {
                 case RESULT:
                     this.keyspace = keyspace;
@@ -215,8 +234,10 @@ class Connection extends org.apache.cassandra.transport.Connection
             }
         } catch (ConnectionException e) {
             throw defunct(e);
+        } catch (TimeoutException e) {
+            logger.warn(String.format("Timeout while setting keyspace on connection to %s. This should not happen but is not critical (it will retried)", address));
         } catch (BusyConnectionException e) {
-            logger.error("Tried to set the keyspace on busy connection. This should not happen but is not critical");
+            logger.warn(String.format("Tried to set the keyspace on busy connection to %s. This should not happen but is not critical (it will retried)", address));
         } catch (ExecutionException e) {
             throw defunct(new ConnectionException(address, "Error while setting keyspace", e));
         }
@@ -237,29 +258,41 @@ class Connection extends org.apache.cassandra.transport.Connection
         return future;
     }
 
-    public void write(ResponseCallback callback) throws ConnectionException, BusyConnectionException {
+    public ResponseHandler write(ResponseCallback callback) throws ConnectionException, BusyConnectionException {
 
         Message.Request request = callback.request();
 
-        if (isDefunct)
-            throw new ConnectionException(address, "Write attempt on defunct connection");
-
-        if (isClosed)
-            throw new ConnectionException(address, "Connection has been closed");
-
         request.attach(this);
 
-        ResponseHandler handler = new ResponseHandler(dispatcher, callback);
+        ResponseHandler handler = new ResponseHandler(this, callback);
         dispatcher.add(handler);
         request.setStreamId(handler.streamId);
+
+        /*
+         * We check for close/defunct *after* having set the handler because closing/defuncting
+         * will set their flag and then error out handler if need. So, by doing the check after
+         * having set the handler, we guarantee that even if we race with defunct/close, we may
+         * never leave a handler that won't get an answer or be errored out.
+         */
+        if (isDefunct) {
+            dispatcher.removeHandler(handler.streamId);
+            throw new ConnectionException(address, "Write attempt on defunct connection");
+        }
+
+        if (isClosed) {
+            dispatcher.removeHandler(handler.streamId);
+            throw new ConnectionException(address, "Connection has been closed");
+        }
 
         logger.trace("[{}] writing request {}", name, request);
         writer.incrementAndGet();
         channel.write(request).addListener(writeHandler(request, handler));
+        return handler;
     }
 
     private ChannelFutureListener writeHandler(final Message.Request request, final ResponseHandler handler) {
         return new ChannelFutureListener() {
+            @Override
             public void operationComplete(ChannelFuture writeFuture) {
 
                 writer.decrementAndGet();
@@ -306,14 +339,21 @@ class Connection extends org.apache.cassandra.transport.Connection
         // Make sure all new writes are rejected
         isClosed = true;
 
-        long start = System.currentTimeMillis();
+        long start = System.nanoTime();
         if (!isDefunct) {
             // Busy waiting, we just wait for request to be fully written, shouldn't take long
             while (writer.get() > 0 && Cluster.timeSince(start, unit) < timeout)
                 Uninterruptibles.sleepUninterruptibly(1, unit);
         }
-        return channel.close().await(timeout - unit.convert(System.currentTimeMillis() - start, TimeUnit.MILLISECONDS), unit);
         // Note: we must not call releaseExternalResources on the bootstrap, because this shutdown the executors, which are shared
+        boolean closed = channel == null // This method can be throw in the ctor at which point channel is not yet set. This is ok.
+                       ? true
+                       : channel.close().await(timeout - Cluster.timeSince(start, unit), unit);
+
+        // We've closed the channel. If anyone was waiting on that connection, we should defunct it otherwise it'll wait forever.
+        // Note that this is a no-op if there is no handler set anymore.
+        dispatcher.errorOutAllHandler(new TransportException(address, "Connection has been closed"));
+        return closed;
     }
 
     public boolean isClosed() {
@@ -334,6 +374,7 @@ class Connection extends org.apache.cassandra.transport.Connection
 
         private final ExecutorService bossExecutor = Executors.newCachedThreadPool();
         private final ExecutorService workerExecutor = Executors.newCachedThreadPool();
+        public final HashedWheelTimer timer = new HashedWheelTimer(new ThreadFactoryBuilder().setNameFormat("Timeouter-%d").build());
 
         private final ChannelFactory channelFactory = new NioClientSocketChannelFactory(bossExecutor, workerExecutor);
         private final ChannelGroup allChannels = new DefaultChannelGroup();
@@ -387,6 +428,14 @@ class Connection extends org.apache.cassandra.transport.Connection
             return g;
         }
 
+        public long getConnectTimeoutMillis() {
+            return configuration.getSocketOptions().getConnectTimeoutMillis();
+        }
+
+        public long getReadTimeoutMillis() {
+            return configuration.getSocketOptions().getReadTimeoutMillis();
+        }
+
         private ClientBootstrap newBootstrap() {
             ClientBootstrap b = new ClientBootstrap(channelFactory);
 
@@ -419,7 +468,7 @@ class Connection extends org.apache.cassandra.transport.Connection
             // Make sure we skip creating connection from now on.
             isShutdown = true;
 
-            long start = System.currentTimeMillis();
+            long start = System.nanoTime();
             ChannelGroupFuture future = allChannels.close();
 
             channelFactory.releaseExternalResources();
@@ -441,7 +490,10 @@ class Connection extends org.apache.cassandra.transport.Connection
         }
 
         public void removeHandler(int streamId) {
-            pending.remove(streamId);
+            ResponseHandler handler = pending.remove(streamId);
+            if (handler != null)
+                handler.cancelTimeout();
+
             streamIdHandler.release(streamId);
         }
 
@@ -464,11 +516,20 @@ class Connection extends org.apache.cassandra.transport.Connection
                 ResponseHandler handler = pending.remove(streamId);
                 streamIdHandler.release(streamId);
                 if (handler == null) {
-                    // Note: this is a bug, either us or cassandra. So log it, but I'm not sure it's worth breaking
-                    // the connection for that.
-                    logger.error("[{}] No handler set for stream {} (this is a bug, either of this driver or of Cassandra, you should report it)", name, streamId);
+                    /**
+                     * During normal operation, we should not receive responses for which we don't have a handler. There is
+                     * two cases however where this can happen:
+                     *   1) The connection has been defuncted due to some internal error and we've raced between removing the
+                     *      handler and actually closing the connection; since the original error has been logged, we're fine
+                     *      ignoring this completely.
+                     *   2) This request has timeouted. In that case, we've already switched to another host (or errored out
+                     *      to the user). So log it for debugging purpose, but it's fine ignoring otherwise.
+                     */
+                    if (!isDefunct())
+                        logger.debug("[{}] Response received on stream {} but no handler set anymore (the request must have timeouted). Received message is {}", name, streamId, response);
                     return;
                 }
+                handler.cancelTimeout();
                 handler.callback.onSet(Connection.this, response);
             }
         }
@@ -482,7 +543,7 @@ class Connection extends org.apache.cassandra.transport.Connection
             if (writer.get() > 0)
                 return;
 
-            defunct(new TransportException(address, "Unexpected exception triggered", e.getCause()));
+            defunct(new TransportException(address, String.format("Unexpected exception triggered (%s)", e.getCause()), e.getCause()));
         }
 
         public void errorOutAllHandler(ConnectionException ce) {
@@ -495,8 +556,7 @@ class Connection extends org.apache.cassandra.transport.Connection
         }
 
         @Override
-        public void channelClosed(ChannelHandlerContext ctx, ChannelStateEvent e)
-        {
+        public void channelClosed(ChannelHandlerContext ctx, ChannelStateEvent e) {
             // If we've closed the channel server side then we don't really want to defunct the connection, but
             // if there is remaining thread waiting on us, we still want to wake them up
             if (isClosed)
@@ -515,21 +575,37 @@ class Connection extends org.apache.cassandra.transport.Connection
             this.request = request;
         }
 
+        @Override
+        public void register(RequestHandler handler) {
+            // noop, we don't care about the handler here so far
+        }
+
+        @Override
         public Message.Request request() {
             return request;
         }
 
+        @Override
         public void onSet(Connection connection, Message.Response response, ExecutionInfo info) {
             onSet(connection, response);
         }
 
+        @Override
         public void onSet(Connection connection, Message.Response response) {
             this.address = connection.address;
             super.set(response);
         }
 
+        @Override
         public void onException(Connection connection, Exception exception) {
+            this.address = connection.address;
             super.setException(exception);
+        }
+
+        @Override
+        public void onTimeout(Connection connection) {
+            this.address = connection.address;
+            super.setException(new ConnectionException(connection.address, "Operation Timeouted"));
         }
 
         public InetAddress getAddress() {
@@ -541,16 +617,42 @@ class Connection extends org.apache.cassandra.transport.Connection
         public Message.Request request();
         public void onSet(Connection connection, Message.Response response);
         public void onException(Connection connection, Exception exception);
+        public void onTimeout(Connection connection);
     }
 
-    private static class ResponseHandler {
+    static class ResponseHandler {
 
+        public final Connection connection;
         public final int streamId;
         public final ResponseCallback callback;
+        private final Timeout timeout;
 
-        public ResponseHandler(Dispatcher dispatcher, ResponseCallback callback) throws BusyConnectionException {
-            this.streamId = dispatcher.streamIdHandler.next();
+        public ResponseHandler(Connection connection, ResponseCallback callback) throws BusyConnectionException {
+            this.connection = connection;
+            this.streamId = connection.dispatcher.streamIdHandler.next();
             this.callback = callback;
+
+            long timeoutMs = connection.factory.getReadTimeoutMillis();
+            this.timeout = timeoutMs <= 0 ? null : connection.factory.timer.newTimeout(onTimeoutTask(), timeoutMs, TimeUnit.MILLISECONDS);
+        }
+
+        void cancelTimeout() {
+            if (timeout != null)
+                timeout.cancel();
+        }
+
+        public void cancelHandler() {
+            connection.dispatcher.removeHandler(streamId);
+        }
+
+        private TimerTask onTimeoutTask() {
+            return new TimerTask() {
+                @Override
+                public void run(Timeout timeout) {
+                    callback.onTimeout(connection);
+                    cancelHandler();
+                }
+            };
         }
     }
 
@@ -570,7 +672,10 @@ class Connection extends org.apache.cassandra.transport.Connection
         private static final org.apache.cassandra.transport.Connection.Tracker tracker;
         static {
             tracker = new org.apache.cassandra.transport.Connection.Tracker() {
+                @Override
                 public void addConnection(Channel ch, org.apache.cassandra.transport.Connection connection) {}
+
+                @Override
                 public void closeAll() {}
             };
         }
@@ -581,12 +686,14 @@ class Connection extends org.apache.cassandra.transport.Connection
         public PipelineFactory(final Connection connection) {
             this.connection = connection;
             this.cfactory = new org.apache.cassandra.transport.Connection.Factory() {
+                @Override
                 public Connection newConnection(org.apache.cassandra.transport.Connection.Tracker tracker) {
                     return connection;
                 }
             };
         }
 
+        @Override
         public ChannelPipeline getPipeline() throws Exception {
             ChannelPipeline pipeline = Channels.pipeline();
 
@@ -603,6 +710,25 @@ class Connection extends org.apache.cassandra.transport.Connection
 
             pipeline.addLast("dispatcher", connection.dispatcher);
 
+            return pipeline;
+        }
+    }
+
+    private static class SecurePipelineFactory extends PipelineFactory {
+
+        private final SSLOptions options;
+
+        public SecurePipelineFactory(final Connection connection, SSLOptions options) {
+            super(connection);
+            this.options = options;
+        }
+
+        public ChannelPipeline getPipeline() throws Exception {
+            SSLEngine engine = options.context.createSSLEngine();
+            engine.setUseClientMode(true);
+            engine.setEnabledCipherSuites(options.cipherSuites);
+            ChannelPipeline pipeline = super.getPipeline();
+            pipeline.addFirst("ssl", new SslHandler(engine));
             return pipeline;
         }
     }

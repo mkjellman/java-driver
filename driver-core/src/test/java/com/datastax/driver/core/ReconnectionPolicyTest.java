@@ -29,7 +29,7 @@ public class ReconnectionPolicyTest extends AbstractPoliciesTest {
     /*
      * Test the ExponentialReconnectionPolicy.
      */
-    @Test(groups = "integration")
+    @Test(groups = "long")
     public void exponentialReconnectionPolicyTest() throws Throwable {
         Cluster.Builder builder = Cluster.builder().withReconnectionPolicy(new ExponentialReconnectionPolicy(2 * 1000, 5 * 60 * 1000));
 
@@ -85,7 +85,7 @@ public class ReconnectionPolicyTest extends AbstractPoliciesTest {
     /*
      * Test the ConstantReconnectionPolicy.
      */
-    @Test(groups = "integration")
+    @Test(groups = "long")
     public void constantReconnectionPolicyTest() throws Throwable {
         Cluster.Builder builder = Cluster.builder().withReconnectionPolicy(new ConstantReconnectionPolicy(10 * 1000));
 
@@ -113,17 +113,17 @@ public class ReconnectionPolicyTest extends AbstractPoliciesTest {
         assertTrue(schedule.nextDelayMs() == 10000);
 
         // Run integration test
-        long restartTime = 16;      // matches the above test
-        long retryTime = 20;        // 2nd cycle start time
+        long restartTime = 32;      // matches the above test
+        long retryTime = 40;        // 2nd cycle start time
         long breakTime = 10;        // time until next reconnection attempt
         reconnectionPolicyTest(builder, restartTime, retryTime, breakTime);
     }
 
     public void reconnectionPolicyTest(Cluster.Builder builder, long restartTime, long retryTime, long breakTime) throws Throwable {
         CCMBridge.CCMCluster c = CCMBridge.buildCluster(1, builder);
-        createSchema(c.session, 1);
 
         try {
+            createSchema(c.session, 1);
             init(c, 12);
             query(c, 12);
 

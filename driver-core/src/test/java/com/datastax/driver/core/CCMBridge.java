@@ -227,7 +227,7 @@ public class CCMBridge {
             }
         }
 
-        @AfterClass(groups = {"integration"})
+        @AfterClass(groups = {"short", "long"})
         public static void discardCluster() {
             if (cluster != null)
                 cluster.shutdown();
@@ -243,12 +243,12 @@ public class CCMBridge {
             }
         }
 
-        @BeforeClass(groups = {"integration"})
+        @BeforeClass(groups = {"short", "long"})
         public void beforeClass() {
-        	createCluster();
-        	maybeCreateSchema();
+            createCluster();
+            maybeCreateSchema();
         }
-        
+
         public void maybeCreateSchema() {
 
             try {
@@ -292,21 +292,25 @@ public class CCMBridge {
             if (nbNodes == 0)
                 throw new IllegalArgumentException();
 
-            return new CCMCluster(CCMBridge.create("test", nbNodes), builder);
+            return new CCMCluster(CCMBridge.create("test", nbNodes), builder, nbNodes);
         }
 
         public static CCMCluster create(int nbNodesDC1, int nbNodesDC2, Cluster.Builder builder) {
             if (nbNodesDC1 == 0)
                 throw new IllegalArgumentException();
 
-            return new CCMCluster(CCMBridge.create("test", nbNodesDC1, nbNodesDC2), builder);
+            return new CCMCluster(CCMBridge.create("test", nbNodesDC1, nbNodesDC2), builder, nbNodesDC1 + nbNodesDC2);
         }
 
-        private CCMCluster(CCMBridge cassandraCluster, Cluster.Builder builder) {
+        private CCMCluster(CCMBridge cassandraCluster, Cluster.Builder builder, int totalNodes) {
             this.cassandraCluster = cassandraCluster;
             try {
                 this.cluster = builder.addContactPoints(IP_PREFIX + "1").build();
                 this.session = cluster.connect();
+
+                Session tmpSession = cluster.connect();
+                waitForAllNodesToComeOnline(tmpSession, totalNodes);
+                waitForSchemaAgreement(tmpSession);
 
             } catch (NoHostAvailableException e) {
                 for (Map.Entry<InetAddress, String> entry : e.getErrors().entrySet())

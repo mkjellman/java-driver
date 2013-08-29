@@ -74,7 +74,7 @@ public class TableMetadata {
 
             // First, figure out which kind of table we are
             boolean isCompact = false;
-            AbstractType ct = TypeParser.parse(row.getString(COMPARATOR));
+            AbstractType<?> ct = TypeParser.parse(row.getString(COMPARATOR));
             boolean isComposite = ct instanceof CompositeType;
             List<AbstractType<?>> columnTypes = isComposite
                                               ? ((CompositeType)ct).types
@@ -83,7 +83,7 @@ public class TableMetadata {
             int clusteringSize;
             boolean hasValue;
             int last = columnTypes.size() - 1;
-            AbstractType lastType = columnTypes.get(last);
+            AbstractType<?> lastType = columnTypes.get(last);
             if (isComposite) {
                 if (lastType instanceof ColumnToCollectionType || (columnAliases.size() == last && lastType instanceof UTF8Type)) {
                     hasValue = false;
@@ -107,7 +107,7 @@ public class TableMetadata {
             TableMetadata tm = new TableMetadata(ksm, name, partitionKey, clusteringKey, columns, new Options(row, isCompact));
 
             // Partition key
-            AbstractType kt = TypeParser.parse(row.getString(KEY_VALIDATOR));
+            AbstractType<?> kt = TypeParser.parse(row.getString(KEY_VALIDATOR));
             List<AbstractType<?>> keyTypes = kt instanceof CompositeType
                                            ? ((CompositeType)kt).types
                                            : Collections.<AbstractType<?>>singletonList(kt);
@@ -135,7 +135,7 @@ public class TableMetadata {
 
             // Value alias (if present)
             if (hasValue) {
-                AbstractType vt = TypeParser.parse(row.getString(VALIDATOR));
+                AbstractType<?> vt = TypeParser.parse(row.getString(VALIDATOR));
                 String valueAlias = row.isNull(KEY_ALIASES) ? DEFAULT_VALUE_ALIAS : row.getString(VALUE_ALIAS);
                 ColumnMetadata vm = new ColumnMetadata(tm, valueAlias, Codec.rawTypeToDataType(vt), null);
                 columns.put(valueAlias, vm);
@@ -243,6 +243,7 @@ public class TableMetadata {
     // :_(
     private static ObjectMapper jsonMapper = new ObjectMapper(new JsonFactory());
 
+    @SuppressWarnings("unchecked")
     static List<String> fromJsonList(String json) {
         try {
             return jsonMapper.readValue(json, List.class);
@@ -251,6 +252,7 @@ public class TableMetadata {
         }
     }
 
+    @SuppressWarnings("unchecked")
     static Map<String, String> fromJsonMap(String json) {
         try {
             return jsonMapper.readValue(json, Map.class);
@@ -374,7 +376,7 @@ public class TableMetadata {
     }
 
     private StringBuilder and(StringBuilder sb, boolean formatted) {
-        return newLine(sb, formatted).append(spaces(3, formatted)).append("AND ");
+        return newLine(sb, formatted).append(spaces(2, formatted)).append(" AND ");
     }
 
     private String spaces(int n, boolean formatted) {
@@ -407,9 +409,11 @@ public class TableMetadata {
         private static final String COMPACTION_OPTIONS       = "compaction_strategy_options";
         private static final String MIN_COMPACTION_THRESHOLD = "min_compaction_threshold";
         private static final String MAX_COMPACTION_THRESHOLD = "max_compaction_threshold";
+        private static final String POPULATE_CACHE_ON_FLUSH  = "populate_io_cache_on_flush";
         private static final String COMPRESSION_PARAMS       = "compression_parameters";
 
         private static final double DEFAULT_BF_FP_CHANCE = 0.01;
+        private static final boolean DEFAULT_POPULATE_CACHE_ON_FLUSH = false;
 
         private final boolean isCompactStorage;
 
@@ -420,6 +424,7 @@ public class TableMetadata {
         private final int gcGrace;
         private final double bfFpChance;
         private final String caching;
+        private final boolean populateCacheOnFlush;
         private final Map<String, String> compaction = new HashMap<String, String>();
         private final Map<String, String> compression = new HashMap<String, String>();
 
@@ -432,6 +437,7 @@ public class TableMetadata {
             this.gcGrace = row.getInt(GC_GRACE);
             this.bfFpChance = row.isNull(BF_FP_CHANCE) ? DEFAULT_BF_FP_CHANCE : row.getDouble(BF_FP_CHANCE);
             this.caching = row.getString(CACHING);
+            this.populateCacheOnFlush = row.isNull(POPULATE_CACHE_ON_FLUSH) ? DEFAULT_POPULATE_CACHE_ON_FLUSH : row.getBool(POPULATE_CACHE_ON_FLUSH);
 
             this.compaction.put("class", row.getString(COMPACTION_CLASS));
             this.compaction.putAll(fromJsonMap(row.getString(COMPACTION_OPTIONS)));
@@ -511,6 +517,15 @@ public class TableMetadata {
          */
         public String getCaching() {
             return caching;
+        }
+
+        /**
+         * Whether the populate I/O cache on flush is set on this table.
+         *
+         * @return whether the populate I/O cache on flush is set on this table.
+         */
+        public boolean getPopulateIOCacheOnFlush() {
+            return populateCacheOnFlush;
         }
 
         /**

@@ -50,7 +50,8 @@ public class Update extends BuiltStatement {
         this.usings = new Options(this);
     }
 
-    protected String buildQueryString() {
+    @Override
+    protected StringBuilder buildQueryString() {
         StringBuilder builder = new StringBuilder();
 
         builder.append("UPDATE ");
@@ -73,7 +74,7 @@ public class Update extends BuiltStatement {
             Utils.joinAndAppend(builder, " AND ", where.clauses);
         }
 
-        return builder.toString();
+        return builder;
     }
 
     /**

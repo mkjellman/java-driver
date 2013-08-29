@@ -31,6 +31,7 @@ public class SessionTest extends CCMBridge.PerClassSingleNodeCluster {
     private static final String TABLE3 = "test3";
     private static final String COUNTER_TABLE = "counters";
 
+    @Override
     protected Collection<String> getTableDefinitions() {
         return Arrays.asList(String.format(TestUtils.CREATE_TABLE_SIMPLE_FORMAT, TABLE1),
                              String.format(TestUtils.CREATE_TABLE_SIMPLE_FORMAT, TABLE2),
@@ -38,7 +39,7 @@ public class SessionTest extends CCMBridge.PerClassSingleNodeCluster {
                              String.format("CREATE TABLE %s (k text PRIMARY KEY, c counter)", COUNTER_TABLE));
     }
 
-    @Test(groups = "integration")
+    @Test(groups = "short")
     public void executeTest() throws Exception {
         // Simple calls to all versions of the execute/executeAsync methods
         String key = "execute_test";
@@ -54,7 +55,7 @@ public class SessionTest extends CCMBridge.PerClassSingleNodeCluster {
         checkExecuteResultSet(session.executeAsync(new SimpleStatement(String.format(TestUtils.SELECT_ALL_FORMAT, TABLE1)).setConsistencyLevel(ConsistencyLevel.ONE)).getUninterruptibly(), key);
     }
 
-    @Test(groups = "integration")
+    @Test(groups = "short")
     public void executePreparedTest() throws Exception {
         // Simple calls to all versions of the execute/executeAsync methods for prepared statements
         // Note: the goal is only to exercice the Session methods, PreparedStatementTest have better prepared statement tests.
@@ -84,27 +85,7 @@ public class SessionTest extends CCMBridge.PerClassSingleNodeCluster {
         assertEquals(row.getFloat("f"), 24.03f, 0.1f);
     }
 
-    // That test is currently disabled because we actually want to assume drop
-    // doesn't "delog" from a keyspace as this is what Cassandra does. We
-    // may change that depending on the resulotion of CASSANDRA-5358
-    //@Test(groups = "integration")
-    //public void setAndDropKeyspaceTest() throws Exception {
-    //    // Check that if someone set a keyspace and then drop it, we recognize
-    //    // that fact and don't assume he is still set to this keyspace
-
-    //    try {
-    //        session.execute(String.format(TestUtils.CREATE_KEYSPACE_SIMPLE_FORMAT, "to_drop", 1));
-    //        session.execute("USE to_drop");
-    //        session.execute("DROP KEYSPACE to_drop");
-
-    //        assertEquals(session.manager.poolsState.keyspace, null);
-    //    } finally {
-    //        // restore the correct state for remaining states
-    //        session.execute("USE " + TestUtils.SIMPLE_KEYSPACE);
-    //    }
-    //}
-
-    @Test(groups = "integration")
+    @Test(groups = "short")
     public void executePreparedCounterTest() throws Exception {
         PreparedStatement p = session.prepare("UPDATE " + COUNTER_TABLE + " SET c = c + ? WHERE k = ?");
 
@@ -117,7 +98,7 @@ public class SessionTest extends CCMBridge.PerClassSingleNodeCluster {
         assertEquals(rows.get(0).getLong("c"), 2L);
     }
 
-    @Test(groups = "integration")
+    @Test(groups = "short")
     public void compressionTest() throws Exception {
 
         // Same as executeTest, but with compression enabled

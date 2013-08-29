@@ -22,6 +22,8 @@ import com.datastax.driver.core.ConsistencyLevel;
  */
 public class ReadTimeoutException extends QueryTimeoutException {
 
+    private static final long serialVersionUID = 0;
+
     private final boolean dataPresent;
 
     public ReadTimeoutException(ConsistencyLevel consistency, int received, int required, boolean dataPresent) {
@@ -39,7 +41,7 @@ public class ReadTimeoutException extends QueryTimeoutException {
 
     private static String formatDetails(int received, int required, boolean dataPresent) {
         if (received < required)
-            return String.format("%d reponses were required but only %d replica responded", required, received);
+            return String.format("%d responses were required but only %d replica responded", required, received);
         else if (!dataPresent)
             return String.format("the replica queried for data didn't responded");
         else
@@ -62,6 +64,7 @@ public class ReadTimeoutException extends QueryTimeoutException {
         return dataPresent;
     }
 
+    @Override
     public DriverException copy() {
         return new ReadTimeoutException(getMessage(),
                                         this,

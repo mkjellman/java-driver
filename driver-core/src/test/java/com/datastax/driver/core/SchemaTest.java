@@ -31,6 +31,7 @@ public class SchemaTest extends CCMBridge.PerClassSingleNodeCluster {
 
     private static String withOptions;
 
+    @Override
     protected Collection<String> getTableDefinitions() {
 
         String sparse = "CREATE TABLE sparse (\n"
@@ -113,7 +114,7 @@ public class SchemaTest extends CCMBridge.PerClassSingleNodeCluster {
     // way to check we correctly handle schemas so it's probably not so bad.
     // In particular, exportAsString *does not* guarantee that you'll get
     // exactly the same string than the one used to create the table.
-    @Test(groups = "integration")
+    @Test(groups = "short")
     public void schemaExportTest() {
 
         KeyspaceMetadata metadata = cluster.getMetadata().getKeyspace(TestUtils.SIMPLE_KEYSPACE);
@@ -132,7 +133,7 @@ public class SchemaTest extends CCMBridge.PerClassSingleNodeCluster {
     }
 
     // Same remark as the preceding test
-    @Test(groups = "integration")
+    @Test(groups = "short")
     public void schemaExportOptionsTest() {
         TableMetadata metadata = cluster.getMetadata().getKeyspace(TestUtils.SIMPLE_KEYSPACE).getTable("with_options");
         assertEquals(metadata.exportAsString(), withOptions);

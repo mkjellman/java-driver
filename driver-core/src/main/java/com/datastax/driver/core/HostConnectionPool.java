@@ -41,6 +41,7 @@ class HostConnectionPool {
     private final AtomicBoolean isShutdown = new AtomicBoolean();
     private final Set<Connection> trash = new CopyOnWriteArraySet<Connection>();
 
+    private volatile int waiter = 0;
     private final Lock waitLock = new ReentrantLock(true);
     private final Condition hasAvailableConnection = waitLock.newCondition();
 
@@ -55,6 +56,7 @@ class HostConnectionPool {
         this.manager = manager;
 
         this.newConnectionTask = new Runnable() {
+            @Override
             public void run() {
                 addConnectionIfUnderMaximum();
                 scheduledForCreation.decrementAndGet();
@@ -109,7 +111,7 @@ class HostConnectionPool {
             }
         }
 
-        if (minInFlight >= options().getMaxSimultaneousRequestsPerConnectionTreshold(hostDistance) && connections.size() < options().getMaxConnectionPerHost(hostDistance))
+        if (minInFlight >= options().getMaxSimultaneousRequestsPerConnectionThreshold(hostDistance) && connections.size() < options().getMaxConnectionsPerHost(hostDistance))
             maybeSpawnNewConnection();
 
         while (true) {
@@ -127,20 +129,22 @@ class HostConnectionPool {
         return leastBusy;
     }
 
-    private static long elapsed(long start, TimeUnit unit) {
-        return unit.convert(System.currentTimeMillis() - start, TimeUnit.MILLISECONDS);
-    }
-
     private void awaitAvailableConnection(long timeout, TimeUnit unit) throws InterruptedException {
         waitLock.lock();
+        waiter++;
         try {
             hasAvailableConnection.await(timeout, unit);
         } finally {
+            waiter--;
             waitLock.unlock();
         }
     }
 
     private void signalAvailableConnection() {
+        // Quick check if it's worth signaling to avoid locking
+        if (waiter == 0)
+            return;
+
         waitLock.lock();
         try {
             hasAvailableConnection.signal();
@@ -150,16 +154,20 @@ class HostConnectionPool {
     }
 
     private void signalAllAvailableConnection() {
+        // Quick check if it's worth signaling to avoid locking
+        if (waiter == 0)
+            return;
+
         waitLock.lock();
         try {
-            hasAvailableConnection.signal();
+            hasAvailableConnection.signalAll();
         } finally {
             waitLock.unlock();
         }
     }
 
     private Connection waitForConnection(long timeout, TimeUnit unit) throws ConnectionException, TimeoutException {
-        long start = System.currentTimeMillis();
+        long start = System.nanoTime();
         long remaining = timeout;
         do {
             try {
@@ -193,7 +201,7 @@ class HostConnectionPool {
                     return leastBusy;
             }
 
-            remaining = timeout - elapsed(start, unit);
+            remaining = timeout - Cluster.timeSince(start, unit);
         } while (remaining > 0);
 
         throw new TimeoutException();
@@ -203,7 +211,7 @@ class HostConnectionPool {
         int inFlight = connection.inFlight.decrementAndGet();
 
         if (connection.isDefunct()) {
-            if (host.getMonitor().signalConnectionFailure(connection.lastException()))
+            if (manager.cluster.manager.signalConnectionFailure(host, connection.lastException()))
                 shutdown();
             else
                 replace(connection);
@@ -215,7 +223,7 @@ class HostConnectionPool {
                 return;
             }
 
-            if (connections.size() > options().getCoreConnectionsPerHost(hostDistance) && inFlight <= options().getMinSimultaneousRequestsPerConnectionTreshold(hostDistance)) {
+            if (connections.size() > options().getCoreConnectionsPerHost(hostDistance) && inFlight <= options().getMinSimultaneousRequestsPerConnectionThreshold(hostDistance)) {
                 trashConnection(connection);
             } else {
                 signalAvailableConnection();
@@ -246,7 +254,7 @@ class HostConnectionPool {
         // First, make sure we don't cross the allowed limit of open connections
         for(;;) {
             int opened = open.get();
-            if (opened >= options().getMaxConnectionPerHost(hostDistance))
+            if (opened >= options().getMaxConnectionsPerHost(hostDistance))
                 return false;
 
             if (open.compareAndSet(opened, opened + 1))
@@ -271,7 +279,7 @@ class HostConnectionPool {
         } catch (ConnectionException e) {
             open.decrementAndGet();
             logger.debug("Connection error to {} while creating additional connection", host);
-            if (host.getMonitor().signalConnectionFailure(e))
+            if (manager.cluster.manager.signalConnectionFailure(host, e))
                 shutdown();
             return false;
         } catch (AuthenticationException e) {
@@ -300,6 +308,7 @@ class HostConnectionPool {
         connections.remove(connection);
 
         manager.executor().submit(new Runnable() {
+            @Override
             public void run() {
                 connection.close();
                 addConnectionIfUnderMaximum();
@@ -309,6 +318,7 @@ class HostConnectionPool {
 
     private void close(final Connection connection) {
         manager.executor().submit(new Runnable() {
+            @Override
             public void run() {
                 connection.close();
             }
@@ -343,7 +353,7 @@ class HostConnectionPool {
     }
 
     private boolean discardAvailableConnections(long timeout, TimeUnit unit) throws InterruptedException {
-        long start = System.currentTimeMillis();
+        long start = System.nanoTime();
         boolean success = true;
         for (Connection connection : connections) {
             success &= connection.close(timeout - Cluster.timeSince(start, unit), unit);

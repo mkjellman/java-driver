@@ -20,6 +20,8 @@ package com.datastax.driver.core.exceptions;
  */
 public class InvalidQueryException extends QueryValidationException {
 
+    private static final long serialVersionUID = 0;
+
     public InvalidQueryException(String msg) {
         super(msg);
     }
@@ -28,6 +30,7 @@ public class InvalidQueryException extends QueryValidationException {
         super(msg, cause);
     }
 
+    @Override
     public DriverException copy() {
         return new InvalidQueryException(getMessage(), this);
     }

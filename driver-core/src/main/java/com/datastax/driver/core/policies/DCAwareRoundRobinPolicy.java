@@ -87,6 +87,7 @@ public class DCAwareRoundRobinPolicy implements LoadBalancingPolicy {
         this.usedHostsPerRemoteDc = usedHostsPerRemoteDc;
     }
 
+    @Override
     public void init(Cluster cluster, Collection<Host> hosts) {
         this.index.set(new Random().nextInt(Math.max(hosts.size(), 1)));
 
@@ -105,6 +106,11 @@ public class DCAwareRoundRobinPolicy implements LoadBalancingPolicy {
         return dc == null ? localDc : dc;
     }
 
+    @SuppressWarnings("unchecked")
+    private static CopyOnWriteArrayList<Host> cloneList(CopyOnWriteArrayList<Host> list) {
+        return (CopyOnWriteArrayList<Host>)list.clone();
+    }
+
     /**
      * Return the HostDistance for the provided host.
      * <p>
@@ -118,6 +124,7 @@ public class DCAwareRoundRobinPolicy implements LoadBalancingPolicy {
      * @param host the host of which to return the distance of.
      * @return the HostDistance to {@code host}.
      */
+    @Override
     public HostDistance distance(Host host) {
         String dc = dc(host);
         if (dc.equals(localDc))
@@ -128,7 +135,7 @@ public class DCAwareRoundRobinPolicy implements LoadBalancingPolicy {
             return HostDistance.IGNORED;
 
         // We need to clone, otherwise our subList call is not thread safe
-        dcHosts = (CopyOnWriteArrayList<Host>)dcHosts.clone();
+        dcHosts = cloneList(dcHosts);
         return dcHosts.subList(0, Math.min(dcHosts.size(), usedHostsPerRemoteDc)).contains(host)
              ? HostDistance.REMOTE
              : HostDistance.IGNORED;
@@ -147,10 +154,11 @@ public class DCAwareRoundRobinPolicy implements LoadBalancingPolicy {
      * @return a new query plan, i.e. an iterator indicating which host to
      * try first for querying, which one to use as failover, etc...
      */
+    @Override
     public Iterator<Host> newQueryPlan(Query query) {
 
         CopyOnWriteArrayList<Host> localLiveHosts = perDcLiveHosts.get(localDc);
-        final List<Host> hosts = localLiveHosts == null ? Collections.<Host>emptyList() : (List<Host>)localLiveHosts.clone();
+        final List<Host> hosts = localLiveHosts == null ? Collections.<Host>emptyList() : cloneList(localLiveHosts);
         final int startIdx = index.getAndIncrement();
 
         // Overflow protection; not theoretically thread safe but should be good enough
@@ -167,6 +175,7 @@ public class DCAwareRoundRobinPolicy implements LoadBalancingPolicy {
             private List<Host> currentDcHosts;
             private int currentDcRemaining;
 
+            @Override
             protected Host computeNext() {
                 if (remainingLocal > 0) {
                     remainingLocal--;
@@ -191,7 +200,7 @@ public class DCAwareRoundRobinPolicy implements LoadBalancingPolicy {
                 CopyOnWriteArrayList<Host> nextDcHosts = perDcLiveHosts.get(nextRemoteDc);
                 if (nextDcHosts != null) {
                     // Clone for thread safety
-                    List<Host> dcHosts = (List<Host>)nextDcHosts.clone();
+                    List<Host> dcHosts = cloneList(nextDcHosts);
                     currentDcHosts = dcHosts.subList(0, Math.min(dcHosts.size(), usedHostsPerRemoteDc));
                     currentDcRemaining = currentDcHosts.size();
                 }
@@ -201,6 +210,7 @@ public class DCAwareRoundRobinPolicy implements LoadBalancingPolicy {
         };
     }
 
+    @Override
     public void onUp(Host host) {
         String dc = dc(host);
         CopyOnWriteArrayList<Host> dcHosts = perDcLiveHosts.get(dc);
@@ -214,16 +224,19 @@ public class DCAwareRoundRobinPolicy implements LoadBalancingPolicy {
         dcHosts.addIfAbsent(host);
     }
 
+    @Override
     public void onDown(Host host) {
         CopyOnWriteArrayList<Host> dcHosts = perDcLiveHosts.get(dc(host));
         if (dcHosts != null)
             dcHosts.remove(host);
     }
 
+    @Override
     public void onAdd(Host host) {
         onUp(host);
     }
 
+    @Override
     public void onRemove(Host host) {
         onDown(host);
     }

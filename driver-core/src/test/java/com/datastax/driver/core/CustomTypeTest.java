@@ -28,6 +28,7 @@ import org.apache.cassandra.utils.ByteBufferUtil;
  */
 public class CustomTypeTest extends CCMBridge.PerClassSingleNodeCluster {
 
+    @Override
     protected Collection<String> getTableDefinitions() {
         return Collections.singleton(
               "CREATE TABLE test ("
@@ -74,7 +75,7 @@ public class CustomTypeTest extends CCMBridge.PerClassSingleNodeCluster {
         return res;
     }
 
-    @Test(groups = "integration")
+    @Test(groups = "short")
     public void DynamicCompositeTypeTest() {
 
         session.execute("INSERT INTO test(k, c, v) VALUES (0, 's@foo:i@32', 1)");

@@ -141,47 +141,11 @@ public abstract class TestUtils {
             case TIMEUUID:
                 return row.getUUID(name);
             case LIST:
-                return row.getList(name, classOf(type.getTypeArguments().get(0)));
+                return row.getList(name, type.getTypeArguments().get(0).asJavaClass());
             case SET:
-                return row.getSet(name, classOf(type.getTypeArguments().get(0)));
+                return row.getSet(name, type.getTypeArguments().get(0).asJavaClass());
             case MAP:
-                return row.getMap(name, classOf(type.getTypeArguments().get(0)), classOf(type.getTypeArguments().get(1)));
-        }
-        throw new RuntimeException("Missing handling of " + type);
-    }
-
-    private static Class classOf(DataType type) {
-        assert !type.isCollection();
-
-        switch (type.getName()) {
-            case ASCII:
-            case TEXT:
-            case VARCHAR:
-                return String.class;
-            case BIGINT:
-            case COUNTER:
-                return Long.class;
-            case BLOB:
-                return ByteBuffer.class;
-            case BOOLEAN:
-                return Boolean.class;
-            case DECIMAL:
-                return BigDecimal.class;
-            case DOUBLE:
-                return Double.class;
-            case FLOAT:
-                return Float.class;
-            case INET:
-                return InetAddress.class;
-            case INT:
-                return Integer.class;
-            case TIMESTAMP:
-                return Date.class;
-            case UUID:
-            case TIMEUUID:
-                return UUID.class;
-            case VARINT:
-                return BigInteger.class;
+                return row.getMap(name, type.getTypeArguments().get(0).asJavaClass(), type.getTypeArguments().get(1).asJavaClass());
         }
         throw new RuntimeException("Missing handling of " + type);
     }
@@ -264,13 +228,13 @@ public abstract class TestUtils {
                 case INT:
                     return Integer.MAX_VALUE;
                 case TEXT:
-                    return "A different text string";
+                    return "résumé";
                 case TIMESTAMP:
                     return new Date(872835240000L);
                 case UUID:
                     return UUID.fromString("067e6162-3b6f-4ae2-a171-2470b63dff00");
                 case VARCHAR:
-                    return "A different varchar string";
+                    return "A different varchar résumé";
                 case VARINT:
                     return new BigInteger(Integer.toString(Integer.MAX_VALUE) + "000");
                 case TIMEUUID:
@@ -292,7 +256,7 @@ public abstract class TestUtils {
     // This is used because there is some delay between when a node has been
     // added through ccm and when it's actually available for querying
     public static void waitFor(String node, Cluster cluster) {
-        waitFor(node, cluster, 20, false, false);
+        waitFor(node, cluster, 30, false, false);
     }
 
     public static void waitFor(String node, Cluster cluster, int maxTry) {
@@ -300,7 +264,18 @@ public abstract class TestUtils {
     }
 
     public static void waitForDown(String node, Cluster cluster) {
-        waitFor(node, cluster, 20, true, false);
+        waitFor(node, cluster, 30, true, false);
+    }
+
+    public static void waitForDownWithWait(String node, Cluster cluster, int waitTime) {
+        waitFor(node, cluster, 30, true, false);
+
+        // FIXME: Once stop() works, remove this line
+        try {
+            Thread.sleep(waitTime * 1000);
+        } catch (InterruptedException e) {
+            e.printStackTrace();
+        }
     }
 
     public static void waitForDown(String node, Cluster cluster, int maxTry) {
@@ -308,7 +283,7 @@ public abstract class TestUtils {
     }
 
     public static void waitForDecommission(String node, Cluster cluster) {
-        waitFor(node, cluster, 20, true, true);
+        waitFor(node, cluster, 30, true, true);
     }
 
     public static void waitForDecommission(String node, Cluster cluster, int maxTry) {
@@ -369,6 +344,62 @@ public abstract class TestUtils {
     }
 
     private static boolean testHost(Host host, boolean testForDown) {
-        return testForDown ? !host.getMonitor().isUp() : host.getMonitor().isUp();
+        return testForDown ? !host.isUp() : host.isUp();
+    }
+
+    // Check for all nodes to come online for up to 30 seconds
+    public static void waitForAllNodesToComeOnline(Session session, int totalNodes) {
+        int maxTry = 30;
+        for (int i = 0; i < maxTry; ++i) {
+            List<Row> rs = session.execute("SELECT * from system.peers").all();
+
+            // Don't count yourself in the peers list
+            if (rs.size() == totalNodes - 1) {
+                return;
+            }
+
+            // Throttle schema polling
+            try { Thread.sleep(1000); } catch (Exception e) {}
+        }
+
+        // Throw exception if not all nodes came online
+        throw new RuntimeException(String.format("Not all nodes came online within %s seconds.", maxTry));
+    }
+
+    // Check for a schema agreement with all nodes for up to 30 seconds
+    public static void waitForSchemaAgreement(Session session) {
+        int maxTry = 30;
+        UUID schemaVersion;
+        for (int i = 0; i < maxTry; ++i) {
+            schemaVersion = null;
+            List<Row> rs = session.execute("SELECT * from system.peers").all();
+
+            // Track disagreements
+            boolean schemaDisagreement = false;
+
+            for (Row row : rs) {
+                // Save the first schemaVersion
+                if (schemaVersion == null) {
+                    schemaVersion = row.getUUID("schema_version");
+                    continue;
+                }
+
+                // Compare all succeeding schemaVersions to the first schemaVersion
+                if (!schemaVersion.equals(row.getUUID("schema_version"))) {
+                    schemaDisagreement = true;
+                    break;
+                }
+            }
+
+            // Exit without an exception when a schema agreement has been reached
+            if (!schemaDisagreement)
+                return;
+
+            // Throttle schema polling
+            try { Thread.sleep(1000); } catch (Exception e) {}
+        }
+
+        // Throw exception if schema agreement is never reached
+        throw new RuntimeException(String.format("Schema agreement not reached within %s seconds.", maxTry));
     }
 }

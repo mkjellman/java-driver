@@ -17,6 +17,8 @@ package com.datastax.driver.core.exceptions;
 
 public class InvalidTypeException extends DriverException {
 
+    private static final long serialVersionUID = 0;
+
     public InvalidTypeException(String msg) {
         super(msg);
     }
@@ -25,6 +27,7 @@ public class InvalidTypeException extends DriverException {
         super(msg, cause);
     }
 
+    @Override
     public DriverException copy() {
         return new InvalidTypeException(getMessage(), this);
     }

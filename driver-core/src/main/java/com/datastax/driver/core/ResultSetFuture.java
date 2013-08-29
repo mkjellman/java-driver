@@ -19,7 +19,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.TimeUnit;
 
-import com.google.common.base.Throwables;
+import com.google.common.util.concurrent.Uninterruptibles;
 
 import org.apache.cassandra.transport.Message;
 import org.apache.cassandra.transport.messages.ErrorMessage;
@@ -27,14 +27,19 @@ import org.apache.cassandra.transport.messages.ResultMessage;
 
 import com.datastax.driver.core.exceptions.*;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 /**
  * A future on a {@link ResultSet}.
  *
  * Note that this class implements <a href="http://code.google.com/p/guava-libraries/">Guava</a>'s {@code
  * ListenableFuture} and can so be used with Guava's future utilities.
  */
-public class ResultSetFuture extends SimpleFuture<ResultSet>
-{
+public class ResultSetFuture extends SimpleFuture<ResultSet> {
+
+    private static final Logger logger = LoggerFactory.getLogger(ResultSetFuture.class);
+
     private final Session.Manager session;
     final ResponseCallback callback;
 
@@ -48,15 +53,23 @@ public class ResultSetFuture extends SimpleFuture<ResultSet>
     class ResponseCallback implements RequestHandler.Callback {
 
         private final Message.Request request;
+        private volatile RequestHandler handler;
 
         ResponseCallback(Message.Request request) {
             this.request = request;
         }
 
+        @Override
+        public void register(RequestHandler handler) {
+            this.handler = handler;
+        }
+
+        @Override
         public Message.Request request() {
             return request;
         }
 
+        @Override
         public void onSet(Connection connection, Message.Response response, ExecutionInfo info) {
             try {
                 switch (response.type) {
@@ -98,6 +111,9 @@ public class ResultSetFuture extends SimpleFuture<ResultSet>
                                             session.cluster.manager.refreshSchema(connection, ResultSetFuture.this, rs, scc.keyspace, scc.columnFamily);
                                         }
                                         break;
+                                    default:
+                                        logger.info("Ignoring unknown schema change result");
+                                        break;
                                 }
                                 break;
                             default:
@@ -120,13 +136,23 @@ public class ResultSetFuture extends SimpleFuture<ResultSet>
             }
         }
 
-        // This is only called for internal calls, so don't bother with ExecutionInfo
+        @Override
         public void onSet(Connection connection, Message.Response response) {
+            // This is only called for internal calls (i.e, when the callback is not wrapped in ResponseHandler),
+            // so don't bother with ExecutionInfo.
             onSet(connection, response, null);
         }
 
+        @Override
         public void onException(Connection connection, Exception exception) {
             setException(exception);
+        }
+
+        @Override
+        public void onTimeout(Connection connection) {
+            // This is only called for internal calls (i.e, when the callback is not wrapped in ResponseHandler).
+            // So just set an exception for the final result, which should be handled correctly by said internal call.
+            setException(new ConnectionException(connection.address, "Operation Timeouted"));
         }
     }
 
@@ -147,28 +173,15 @@ public class ResultSetFuture extends SimpleFuture<ResultSet>
      * @throws QueryExecutionException if the query triggered an execution
      * exception, that is an exception thrown by Cassandra when it cannot execute
      * the query with the requested consistency level successfully.
-     * @throws QueryValidationException if the query if invalid (syntax error,
+     * @throws QueryValidationException if the query is invalid (syntax error,
      * unauthorized or any other validation problem).
      */
     public ResultSet getUninterruptibly() {
-        boolean interrupted = false;
         try {
-            while (true) {
-                try {
-                    return super.get();
-                } catch (InterruptedException e) {
-                    // We said 'uninterruptibly'
-                    interrupted = true;
-                }
-            }
+            return Uninterruptibles.getUninterruptibly(this);
         } catch (ExecutionException e) {
             extractCauseFromExecutionException(e);
             throw new AssertionError();
-        } finally {
-            // Restore interrupted state
-            if (interrupted) {
-                Thread.currentThread().interrupt();
-            }
         }
     }
 
@@ -197,31 +210,53 @@ public class ResultSetFuture extends SimpleFuture<ResultSet>
      * QueryExecutionException}).
      */
     public ResultSet getUninterruptibly(long timeout, TimeUnit unit) throws TimeoutException {
-        long start = System.nanoTime();
-        long timeoutNanos = unit.toNanos(timeout);
-        boolean interrupted = false;
         try {
-            while (true) {
-                try {
-                    return super.get(timeoutNanos, TimeUnit.NANOSECONDS);
-                } catch (InterruptedException e) {
-                    // We said 'uninterruptibly'
-                    long now = System.nanoTime();
-                    long elapsedNanos = now - start;
-                    timeoutNanos = timeoutNanos - elapsedNanos;
-                    start = now;
-                    interrupted = true;
-                }
-            }
+            return Uninterruptibles.getUninterruptibly(this, timeout, unit);
         } catch (ExecutionException e) {
             extractCauseFromExecutionException(e);
             throw new AssertionError();
-        } finally {
-            // Restore interrupted state
-            if (interrupted) {
-                Thread.currentThread().interrupt();
-            }
         }
+    }
+
+    /**
+     * Attempts to cancel the execution of the request corresponding to this
+     * future. This attempt will fail if the request has already returned.
+     * <p>
+     * Please note that this only cancle the request driver side, but nothing
+     * is done to interrupt the execution of the request Cassandra side (and that even
+     * if {@code mayInterruptIfRunning} is true) since  Cassandra does not
+     * support such interruption.
+     * <p>
+     * This method can be used to ensure no more work is performed driver side
+     * (which, while it doesn't include stopping a request already submitted
+     * to a Cassandra node, may include not retrying another Cassandra host on
+     * failure/timeout) if the ResultSet is not going to be retried. Typically,
+     * the code to wait for a request result for a maximum of 1 second could
+     * look like:
+     * <pre>
+     *   ResultSetFuture future = session.executeAsync(...some query...);
+     *   try {
+     *       ResultSet result = future.get(1, TimeUnit.SECONDS);
+     *       ... process result ...
+     *   } catch (TimeoutException e) {
+     *       future.cancel(true); // Ensure any ressource used by this query driver
+     *                            // side is released immediately
+     *       ... handle timeout ...
+     *   }
+     * <pre>
+     *
+     * @param mayInterruptIfRunning the value of this parameter is currently
+     * ignored.
+     * @return {@code false} if the future could not be cancelled (it has already
+     * completed normally); {@code true} otherwise.
+     */
+    @Override
+    public boolean cancel(boolean mayInterruptIfRunning) {
+        if (!super.cancel(mayInterruptIfRunning))
+            return false;
+
+        callback.handler.cancel();
+        return true;
     }
 
     static void extractCauseFromExecutionException(ExecutionException e) {

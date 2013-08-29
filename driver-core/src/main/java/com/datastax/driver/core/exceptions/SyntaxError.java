@@ -20,6 +20,8 @@ package com.datastax.driver.core.exceptions;
  */
 public class SyntaxError extends QueryValidationException {
 
+    private static final long serialVersionUID = 0;
+
     public SyntaxError(String msg) {
         super(msg);
     }
@@ -28,6 +30,7 @@ public class SyntaxError extends QueryValidationException {
         super(msg, cause);
     }
 
+    @Override
     public DriverException copy() {
         return new SyntaxError(getMessage(), this);
     }

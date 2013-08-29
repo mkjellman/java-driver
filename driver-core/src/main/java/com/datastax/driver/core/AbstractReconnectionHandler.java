@@ -32,12 +32,12 @@ abstract class AbstractReconnectionHandler implements Runnable {
 
     private final ScheduledExecutorService executor;
     private final ReconnectionPolicy.ReconnectionSchedule schedule;
-    private final AtomicReference<ScheduledFuture> currentAttempt;
+    private final AtomicReference<ScheduledFuture<?>> currentAttempt;
 
     private volatile boolean readyForNext;
-    private volatile ScheduledFuture localFuture;
+    private volatile ScheduledFuture<?> localFuture;
 
-    public AbstractReconnectionHandler(ScheduledExecutorService executor, ReconnectionPolicy.ReconnectionSchedule schedule, AtomicReference<ScheduledFuture> currentAttempt) {
+    public AbstractReconnectionHandler(ScheduledExecutorService executor, ReconnectionPolicy.ReconnectionSchedule schedule, AtomicReference<ScheduledFuture<?>> currentAttempt) {
         this.executor = executor;
         this.schedule = schedule;
         this.currentAttempt = currentAttempt;
@@ -60,7 +60,7 @@ abstract class AbstractReconnectionHandler implements Runnable {
 
             // If there a previous task, cancel it, so only one reconnection handler runs.
             while (true) {
-                ScheduledFuture previous = currentAttempt.get();
+                ScheduledFuture<?> previous = currentAttempt.get();
                 if (currentAttempt.compareAndSet(previous, localFuture)) {
                     if (previous != null)
                         previous.cancel(false);
@@ -74,6 +74,7 @@ abstract class AbstractReconnectionHandler implements Runnable {
         }
     }
 
+    @Override
     public void run() {
         // We shouldn't arrive here if the future is cancelled but better safe than sorry
         if (localFuture.isCancelled())
@@ -116,7 +117,7 @@ abstract class AbstractReconnectionHandler implements Runnable {
 
     private void reschedule(long nextDelay) {
         readyForNext = false;
-        ScheduledFuture newFuture = executor.schedule(this, nextDelay, TimeUnit.MILLISECONDS);
+        ScheduledFuture<?> newFuture = executor.schedule(this, nextDelay, TimeUnit.MILLISECONDS);
         assert localFuture != null;
         // If it's not our future the current one, then we've been canceled
         if (!currentAttempt.compareAndSet(localFuture, newFuture)) {

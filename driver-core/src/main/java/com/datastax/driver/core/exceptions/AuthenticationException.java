@@ -22,6 +22,8 @@ import java.net.InetAddress;
  */
 public class AuthenticationException extends DriverException {
 
+    private static final long serialVersionUID = 0;
+
     private final InetAddress host;
 
     public AuthenticationException(InetAddress host, String message) {
@@ -44,6 +46,7 @@ public class AuthenticationException extends DriverException {
         return host;
     }
 
+    @Override
     public DriverException copy() {
         return new AuthenticationException(getMessage(), this, host);
     }

@@ -19,8 +19,11 @@ import java.nio.ByteBuffer;
 import java.util.List;
 
 import com.datastax.driver.core.ColumnMetadata;
+import com.datastax.driver.core.ConsistencyLevel;
+import com.datastax.driver.core.Query;
 import com.datastax.driver.core.Statement;
 import com.datastax.driver.core.TableMetadata;
+import com.datastax.driver.core.policies.RetryPolicy;
 
 abstract class BuiltStatement extends Statement {
 
@@ -40,16 +43,29 @@ abstract class BuiltStatement extends Statement {
         this.routingKey = new ByteBuffer[tableMetadata.getPartitionKey().size()];
     }
 
+    @Override
     public String getQueryString() {
         if (dirty || cache == null) {
-            cache = buildQueryString().trim();
-            if (!cache.endsWith(";"))
-                cache += ";";
+            StringBuilder sb = buildQueryString();
+
+            // Use the same test that String#trim() uses to determine
+            // if a character is a whitespace character.
+            int l = sb.length();
+            while (l > 0 && sb.charAt(l - 1) <= ' ')
+                l -= 1;
+            if (l != sb.length())
+                sb.setLength(l);
+
+            if (l == 0 || sb.charAt(l - 1) != ';')
+                sb.append(';');
+
+            cache = sb.toString();
+            dirty = false;
         }
         return cache;
     }
 
-    protected abstract String buildQueryString();
+    protected abstract StringBuilder buildQueryString();
 
     protected void setDirty() {
         dirty = true;
@@ -69,13 +85,14 @@ abstract class BuiltStatement extends Statement {
             return;
 
         for (int i = 0; i < partitionKey.size(); i++) {
-            if (name.equals(partitionKey.get(i).getName()) && !Utils.isFunctionCall(value)) {
+            if (name.equals(partitionKey.get(i).getName()) && Utils.isRawValue(value)) {
                 routingKey[i] = partitionKey.get(i).getType().parse(Utils.toRawString(value));
                 return;
             }
         }
     }
 
+    @Override
     public ByteBuffer getRoutingKey() {
         if (routingKey == null)
             return null;
@@ -96,8 +113,9 @@ abstract class BuiltStatement extends Statement {
             totalLength += 2 + bb.remaining() + 1;
 
         ByteBuffer out = ByteBuffer.allocate(totalLength);
-        for (ByteBuffer bb : buffers)
+        for (ByteBuffer buffer : buffers)
         {
+            ByteBuffer bb = buffer.duplicate();
             putShortLength(out, bb.remaining());
             out.put(bb);
             out.put((byte) 0);
@@ -127,7 +145,8 @@ abstract class BuiltStatement extends Statement {
             return statement.getQueryString();
         }
 
-        protected String buildQueryString() {
+        @Override
+        protected StringBuilder buildQueryString() {
             throw new UnsupportedOperationException();
         }
 
@@ -146,5 +165,43 @@ abstract class BuiltStatement extends Statement {
             return statement.isCounterOp();
         }
 
+        @Override
+        public Query setConsistencyLevel(ConsistencyLevel consistency) {
+            statement.setConsistencyLevel(consistency);
+            return this;
+        }
+
+        @Override
+        public ConsistencyLevel getConsistencyLevel() {
+            return statement.getConsistencyLevel();
+        }
+
+        @Override
+        public Query enableTracing() {
+            statement.enableTracing();
+            return this;
+        }
+
+        @Override
+        public Query disableTracing() {
+            statement.disableTracing();
+            return this;
+        }
+
+        @Override
+        public boolean isTracing() {
+            return statement.isTracing();
+        }
+
+        @Override
+        public Query setRetryPolicy(RetryPolicy policy) {
+            statement.setRetryPolicy(policy);
+            return this;
+        }
+
+        @Override
+        public RetryPolicy getRetryPolicy() {
+            return statement.getRetryPolicy();
+        }
     }
 }

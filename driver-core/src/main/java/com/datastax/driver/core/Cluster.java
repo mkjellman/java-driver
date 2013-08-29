@@ -23,6 +23,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 import com.google.common.collect.HashMultimap;
 import com.google.common.collect.SetMultimap;
+import com.google.common.util.concurrent.ListeningExecutorService;
+import com.google.common.util.concurrent.MoreExecutors;
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
 
 import org.apache.cassandra.utils.MD5Digest;
@@ -156,12 +158,42 @@ public class Cluster {
      * The cluster metrics.
      *
      * @return the cluster metrics, or {@code null} if metrics collection has
-     * been disabled (see {@link Configuration#isMetricsEnabled}).
+     * been disabled (that is if {@link Configuration#getMetricsOptions}
+     * returns {@code null}).
      */
     public Metrics getMetrics() {
-        return manager.configuration.isMetricsEnabled()
-             ? manager.metrics
-             : null;
+        return manager.metrics;
+    }
+
+    /**
+     * Registers the provided listener to be notified on hosts
+     * up/down/added/removed events.
+     * <p>
+     * Registering the same listener multiple times is a no-op.
+     * <p>
+     * Note that while {@link LoadBalancingPolicy} implements
+     * {@code Host.StateListener}, the configured load balancy does not
+     * need to (and should not) be registered through this  method to
+     * received host related events.
+     *
+     * @param listener the new {@link Host.StateListener} to register.
+     * @return this {@code Cluster} object;
+     */
+    public Cluster register(Host.StateListener listener) {
+        manager.listeners.add(listener);
+        return this;
+    }
+
+    /**
+     * Unregisters the provided listener from being notified on hosts events.
+     * <p>
+     * This method is a no-op if {@code listener} hadn't previously be
+     * registered against this monitor.
+     *
+     * @param listener the {@link Host.StateListener} to unregister.
+     */
+    public void unregister(Host.StateListener listener) {
+        manager.listeners.remove(listener);
     }
 
     /**
@@ -254,10 +286,13 @@ public class Cluster {
         private RetryPolicy retryPolicy;
 
         private ProtocolOptions.Compression compression = ProtocolOptions.Compression.NONE;
+        private SSLOptions sslOptions = null;
         private boolean metricsEnabled = true;
+        private boolean jmxEnabled = true;
         private final PoolingOptions poolingOptions = new PoolingOptions();
         private final SocketOptions socketOptions = new SocketOptions();
 
+        @Override
         public List<InetAddress> getContactPoints() {
             return addresses;
         }
@@ -346,7 +381,7 @@ public class Cluster {
          * Configures the load balancing policy to use for the new cluster.
          * <p>
          * If no load balancing policy is set through this method,
-         * {@link Policies#DEFAULT_LOAD_BALANCING_POLICY} will be used instead.
+         * {@link Policies#defaultLoadBalancingPolicy} will be used instead.
          *
          * @param policy the load balancing policy to use
          * @return this Builder
@@ -385,16 +420,19 @@ public class Cluster {
         }
 
         /**
-         * Uses the provided {@code AuthInfoProvider} to connect to Cassandra hosts.
+         * Uses the provided credentials when connecting to Cassandra hosts.
          * <p>
-         * This is optional if the Cassandra cluster has been configured to not
-         * require authentication (the default).
+         * This should be used if the Cassandra cluster has been configured to
+         * use the {@code PasswordAuthenticator}. If the the default {@code
+         * AllowAllAuthenticator} is used instead, using this method has no
+         * effect.
          *
-         * @param authInfoProvider the authentication info provider to use
+         * @param username the username to use to login to Cassandra hosts.
+         * @param password the password corresponding to {@code username}.
          * @return this Builder
          */
-        public Builder withAuthInfoProvider(AuthInfoProvider authInfoProvider) {
-            this.authProvider = authInfoProvider;
+        public Builder withCredentials(String username, String password) {
+            this.authProvider = new AuthInfoProvider.Simple(username, password);
             return this;
         }
 
@@ -419,6 +457,50 @@ public class Cluster {
          */
         public Builder withoutMetrics() {
             this.metricsEnabled = false;
+            return this;
+        }
+
+        /**
+         * Enables the use of SSL for the created {@code Cluster}.
+         * <p>
+         * Calling this method will use default SSL options (see {@link SSLOptions#SSLOptions()}).
+         * This is thus a shortcut for {@code withSSL(new SSLOptions())}.
+         *
+         * Note that if SSL is enabled, the driver will not connect to any
+         * Cassandra nodes that doesn't have SSL enabled and it is strongly
+         * advised to enable SSL on every Cassandra node if you plan on using
+         * SSL in the driver.
+         *
+         * @return this builder
+         */
+        public Builder withSSL() {
+            this.sslOptions = new SSLOptions();
+            return this;
+        }
+
+        /**
+         * Enable the use of SSL for the created {@code Cluster} using the provided options.
+         *
+         * @param sslOptions the SSL options to use.
+         *
+         * @return this builder
+         */
+        public Builder withSSL(SSLOptions sslOptions) {
+            this.sslOptions = sslOptions;
+            return this;
+        }
+
+        /**
+         * Disables JMX reporting of the metrics.
+         * <p>
+         * JMX reporting is enabled by default (see {@link Metrics}) but can be
+         * disabled using this option. If metrics are disabled, this is a
+         * no-op.
+         *
+         * @return this builder
+         */
+        public Builder withoutJMXReporting() {
+            this.jmxEnabled = false;
             return this;
         }
 
@@ -453,18 +535,19 @@ public class Cluster {
          *
          * @return the configuration to use for the new cluster.
          */
+        @Override
         public Configuration getConfiguration() {
             Policies policies = new Policies(
-                loadBalancingPolicy == null ? Policies.DEFAULT_LOAD_BALANCING_POLICY : loadBalancingPolicy,
-                reconnectionPolicy == null ? Policies.DEFAULT_RECONNECTION_POLICY : reconnectionPolicy,
-                retryPolicy == null ? Policies.DEFAULT_RETRY_POLICY : retryPolicy
+                loadBalancingPolicy == null ? Policies.defaultLoadBalancingPolicy() : loadBalancingPolicy,
+                reconnectionPolicy == null ? Policies.defaultReconnectionPolicy() : reconnectionPolicy,
+                retryPolicy == null ? Policies.defaultRetryPolicy() : retryPolicy
             );
             return new Configuration(policies,
-                                     new ProtocolOptions(port).setCompression(compression),
+                                     new ProtocolOptions(port, sslOptions).setCompression(compression),
                                      poolingOptions,
                                      socketOptions,
                                      authProvider,
-                                     metricsEnabled);
+                                     metricsEnabled ? new MetricsOptions(jmxEnabled) : null);
         }
 
         /**
@@ -489,8 +572,8 @@ public class Cluster {
         return new ThreadFactoryBuilder().setNameFormat(nameFormat).build();
     }
 
-    static long timeSince(long start, TimeUnit unit) {
-        return unit.convert(System.currentTimeMillis() - start, TimeUnit.MILLISECONDS);
+    static long timeSince(long startNanos, TimeUnit destUnit) {
+        return destUnit.convert(System.nanoTime() - startNanos, TimeUnit.NANOSECONDS);
     }
 
     /**
@@ -520,7 +603,7 @@ public class Cluster {
         // applied in the order received.
         final ScheduledExecutorService scheduledTasksExecutor = Executors.newScheduledThreadPool(1, threadFactory("Scheduled Tasks-%d"));
 
-        final ExecutorService executor = Executors.newCachedThreadPool(threadFactory("Cassandra Java Driver worker-%d"));
+        final ListeningExecutorService executor = MoreExecutors.listeningDecorator(Executors.newCachedThreadPool(threadFactory("Cassandra Java Driver worker-%d")));
 
         final AtomicBoolean isShutdown = new AtomicBoolean(false);
 
@@ -530,22 +613,35 @@ public class Cluster {
         // this would yield a slightly less clear behavior.
         final Map<MD5Digest, PreparedStatement> preparedQueries = new ConcurrentHashMap<MD5Digest, PreparedStatement>();
 
+        private final Set<Host.StateListener> listeners = new CopyOnWriteArraySet<Host.StateListener>();
+
         private Manager(List<InetAddress> contactPoints, Configuration configuration) {
+            logger.debug("Starting new cluster with contact points " + contactPoints);
+
             this.configuration = configuration;
             this.metadata = new Metadata(this);
             this.contactPoints = contactPoints;
             this.connectionFactory = new Connection.Factory(this, configuration.getAuthInfoProvider());
 
+            this.controlConnection = new ControlConnection(this);
+
+            this.metrics = configuration.getMetricsOptions() == null ? null : new Metrics(this);
+            this.configuration.register(this);
+
+        }
+
+        // This is separated from the constructor because this reference the
+        // Cluster object, whose manager won't be properly initialized until
+        // the constructor returns.
+        private void init() {
+
             for (InetAddress address : contactPoints)
                 addHost(address, false);
 
-            this.controlConnection = new ControlConnection(this, metadata);
-
-            this.metrics = new Metrics(this);
-            this.configuration.register(this);
+            loadBalancingPolicy().init(Cluster.this, metadata.allHosts());
 
             try {
-                this.controlConnection.connect();
+                controlConnection.connect();
             } catch (NoHostAvailableException e) {
                 try {
                     shutdown(0, TimeUnit.MILLISECONDS);
@@ -556,15 +652,16 @@ public class Cluster {
             }
         }
 
-        // This is separated from the constructor because this reference the
-        // Cluster object, whose manager won't be properly initialized until
-        // the constructor returns.
-        private void init() {
-            this.configuration.getPolicies().getLoadBalancingPolicy().init(Cluster.this, metadata.getAllHosts());
-        }
-
         Cluster getCluster() {
             return Cluster.this;
+        }
+
+        LoadBalancingPolicy loadBalancingPolicy() {
+            return configuration.getPolicies().getLoadBalancingPolicy();
+        }
+
+        ReconnectionPolicy reconnectionPolicy() {
+            return configuration.getPolicies().getReconnectionPolicy();
         }
 
         private Session newSession() {
@@ -580,7 +677,7 @@ public class Cluster {
 
             logger.debug("Shutting down");
 
-            long start = System.currentTimeMillis();
+            long start = System.nanoTime();
             boolean success = true;
 
             success &= controlConnection.shutdown(timeout, unit);
@@ -605,13 +702,24 @@ public class Cluster {
                 && executor.awaitTermination(timeout - timeSince(start, unit), unit);
         }
 
+        @Override
         public void onUp(Host host) {
             logger.trace("Host {} is UP", host);
 
+            if (isShutdown.get())
+                return;
+
+            if (host.isUp())
+                return;
+
+            host.setUp();
+
             // If there is a reconnection attempt scheduled for that node, cancel it
-            ScheduledFuture scheduledAttempt = host.reconnectionAttempt.getAndSet(null);
-            if (scheduledAttempt != null)
+            ScheduledFuture<?> scheduledAttempt = host.reconnectionAttempt.getAndSet(null);
+            if (scheduledAttempt != null) {
+                logger.debug("Cancelling reconnection attempt since node is UP");
                 scheduledAttempt.cancel(false);
+            }
 
             try {
                 prepareAllQueries(host);
@@ -620,20 +728,45 @@ public class Cluster {
                 // Don't propagate because we don't want to prevent other listener to run
             }
 
+            // Session#onUp() expects the load balancing policy to have been updated first, so that
+            // Host distances are up to date. This mean the policy could return the node before the
+            // new pool have been created. This is harmless if there is no prior pool since RequestHandler
+            // will ignore the node, but we do wan to make sure there is no prior pool so we don't
+            // query from a pool we will shutdown right away.
+            for (Session s : sessions)
+                s.manager.removePool(host);
+            loadBalancingPolicy().onUp(host);
             controlConnection.onUp(host);
             for (Session s : sessions)
                 s.manager.onUp(host);
+
+            for (Host.StateListener listener : listeners)
+                listener.onUp(host);
         }
 
+        @Override
         public void onDown(final Host host) {
             logger.trace("Host {} is DOWN", host);
+
+            if (isShutdown.get())
+                return;
+
+            if (!host.isUp())
+                return;
+
+            host.setDown();
+
+            loadBalancingPolicy().onDown(host);
             controlConnection.onDown(host);
             for (Session s : sessions)
                 s.manager.onDown(host);
 
+            for (Host.StateListener listener : listeners)
+                listener.onDown(host);
+
             // Note: we basically waste the first successful reconnection, but it's probably not a big deal
             logger.debug("{} is down, scheduling connection retries", host);
-            new AbstractReconnectionHandler(reconnectionExecutor, configuration.getPolicies().getReconnectionPolicy().newSchedule(), host.reconnectionAttempt) {
+            new AbstractReconnectionHandler(reconnectionExecutor, reconnectionPolicy().newSchedule(), host.reconnectionAttempt) {
 
                 protected Connection tryReconnect() throws ConnectionException, InterruptedException {
                     return connectionFactory.open(host);
@@ -641,7 +774,7 @@ public class Cluster {
 
                 protected void onReconnection(Connection connection) {
                     logger.debug("Successful reconnection to {}, setting host UP", host);
-                    host.getMonitor().setUp();
+                    onUp(host);
                 }
 
                 protected boolean onConnectionException(ConnectionException e, long nextDelayMs) {
@@ -658,8 +791,12 @@ public class Cluster {
             }.start();
         }
 
+        @Override
         public void onAdd(Host host) {
             logger.trace("Adding new host {}", host);
+
+            if (isShutdown.get())
+                return;
 
             try {
                 prepareAllQueries(host);
@@ -668,16 +805,41 @@ public class Cluster {
                 // Don't propagate because we don't want to prevent other listener to run
             }
 
+            loadBalancingPolicy().onAdd(host);
             controlConnection.onAdd(host);
             for (Session s : sessions)
                 s.manager.onAdd(host);
+
+            for (Host.StateListener listener : listeners)
+                listener.onAdd(host);
         }
 
+        @Override
         public void onRemove(Host host) {
+            if (isShutdown.get())
+                return;
+
+            host.setDown();
+
             logger.trace("Removing host {}", host);
+            loadBalancingPolicy().onRemove(host);
             controlConnection.onRemove(host);
             for (Session s : sessions)
                 s.manager.onRemove(host);
+
+            for (Host.StateListener listener : listeners)
+                listener.onRemove(host);
+        }
+
+        public boolean signalConnectionFailure(Host host, ConnectionException exception) {
+            // If already down, don't signal again
+            if (!host.isUp())
+                return true;
+
+            boolean isDown = host.signalConnectionFailure(exception);
+            if (isDown)
+                onDown(host);
+            return isDown;
         }
 
         public Host addHost(InetAddress address, boolean signal) {
@@ -783,6 +945,7 @@ public class Cluster {
         public void submitSchemaRefresh(final String keyspace, final String table) {
             logger.trace("Submitting schema refresh");
             executor.submit(new Runnable() {
+                @Override
                 public void run() {
                     try {
                         controlConnection.refreshSchema(keyspace, table);
@@ -794,15 +957,18 @@ public class Cluster {
         }
 
         // refresh the schema using the provided connection, and notice the future with the provided resultset once done
-        public void refreshSchema(final Connection connection, final SimpleFuture future, final ResultSet rs, final String keyspace, final String table) {
+        public void refreshSchema(final Connection connection, final SimpleFuture<ResultSet> future, final ResultSet rs, final String keyspace, final String table) {
             if (logger.isDebugEnabled())
                 logger.debug("Refreshing schema for {}{}", keyspace == null ? "" : keyspace, table == null ? "" : "." + table);
 
             executor.submit(new Runnable() {
+                @Override
                 public void run() {
                     try {
-                        // Before refreshing the schema, wait for schema agreement so that querying a table just after having created it don't fail.
-                        ControlConnection.waitForSchemaAgreement(connection, metadata);
+                        // Before refreshing the schema, wait for schema agreement so
+                        // that querying a table just after having created it don't fail.
+                        if (!ControlConnection.waitForSchemaAgreement(connection, metadata))
+                            logger.warn("No schema agreement from live replicas after {} ms. The schema may not be up to date on some nodes.", ControlConnection.MAX_SCHEMA_AGREEMENT_WAIT_MS);
                         ControlConnection.refreshSchema(connection, keyspace, table, Cluster.Manager.this);
                     } catch (Exception e) {
                         logger.error("Error during schema refresh ({}). The schema from Cluster.getMetadata() might appear stale. Asynchronously submitting job to fix.", e.getMessage());
@@ -816,6 +982,7 @@ public class Cluster {
         }
 
         // Called when some message has been received but has been initiated from the server (streamId < 0).
+        @Override
         public void handle(Message.Response response) {
 
             if (!(response instanceof EventMessage)) {
@@ -833,6 +1000,7 @@ public class Cluster {
             // but that before the client-side server is up) so adds a 1 second delay in that case.
             // TODO: this delay is honestly quite random. We should do something on the C* side to fix that.
             scheduledTasksExecutor.schedule(new Runnable() {
+                @Override
                 public void run() {
                     switch (event.type) {
                         case TOPOLOGY_CHANGE:
@@ -858,7 +1026,7 @@ public class Cluster {
                                         // first time we heard about that node apparently, add it
                                         addHost(stc.node.getAddress(), true);
                                     } else {
-                                        hostUp.getMonitor().setUp();
+                                        onUp(hostUp);
                                     }
                                     break;
                                 case DOWN:
@@ -868,7 +1036,7 @@ public class Cluster {
                                     // right away, so we favor the detection to make the Host.isUp method more reliable.
                                     Host hostDown = metadata.getHost(stc.node.getAddress());
                                     if (hostDown != null) {
-                                        hostDown.getMonitor().setDown();
+                                        onDown(hostDown);
                                     }
                                     break;
                             }

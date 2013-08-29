@@ -20,6 +20,10 @@ import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import com.google.common.util.concurrent.Futures;
+import com.google.common.util.concurrent.ListenableFuture;
+import com.google.common.util.concurrent.ListeningExecutorService;
+import com.google.common.util.concurrent.MoreExecutors;
 import com.google.common.util.concurrent.Uninterruptibles;
 
 import com.datastax.driver.core.exceptions.*;
@@ -153,18 +157,48 @@ public class Session {
     }
 
     /**
-     * Prepares the provided query.
+     * Prepares the provided query string.
      *
-     * @param query the CQL query to prepare
+     * @param query the CQL query string to prepare
      * @return the prepared statement corresponding to {@code query}.
      *
      * @throws NoHostAvailableException if no host in the cluster can be
-     * contacted successfully to execute this query.
+     * contacted successfully to prepare this query.
      */
     public PreparedStatement prepare(String query) {
         Connection.Future future = new Connection.Future(new PrepareMessage(query));
         manager.execute(future, Query.DEFAULT);
         return toPreparedStatement(query, future);
+    }
+
+    /**
+     * Prepares the provided query.
+     * <p>
+     * This method is essentially a shortcut for {@code prepare(statement.getQueryString())},
+     * but note that the resulting {@code PreparedStamenent} will inherit the query properties
+     * set on {@code statement}. Concretely, this means that in the following code:
+     * <pre>
+     *   Statement toPrepare = new SimpleStatement("SELECT * FROM test WHERE k=?").setConsistencyLevel(ConsistencyLevel.QUORUM);
+     *   PreparedStatement prepared = session.prepare(toPrepare);
+     *   session.execute(prepared.bind("someValue"));
+     * </pre>
+     * the final execution will be performed with Quorum consistency.
+     *
+     * @param statement the statement to prepare
+     * @return the prepared statement corresponding to {@code statement}.
+     *
+     * @throws NoHostAvailableException if no host in the cluster can be
+     * contacted successfully to prepare this statement.
+     */
+    public PreparedStatement prepare(Statement statement) {
+        PreparedStatement prepared = prepare(statement.getQueryString());
+
+        prepared.setConsistencyLevel(statement.getConsistencyLevel());
+        if (statement.isTracing())
+            prepared.enableTracing();
+        prepared.setRetryPolicy(statement.getRetryPolicy());
+
+        return prepared;
     }
 
     /**
@@ -257,7 +291,6 @@ public class Session {
         final Cluster cluster;
 
         final ConcurrentMap<Host, HostConnectionPool> pools;
-        final LoadBalancingPolicy loadBalancer;
 
         final HostConnectionPool.PoolState poolsState;
 
@@ -267,11 +300,25 @@ public class Session {
             this.cluster = cluster;
 
             this.pools = new ConcurrentHashMap<Host, HostConnectionPool>(hosts.size());
-            this.loadBalancer = cluster.manager.configuration.getPolicies().getLoadBalancingPolicy();
             this.poolsState = new HostConnectionPool.PoolState();
 
+            // Create pool to initial nodes (and wait for them to be created)
             for (Host host : hosts)
-                addOrRenewPool(host);
+            {
+                try
+                {
+                    addOrRenewPool(host).get();
+                }
+                catch (ExecutionException e)
+                {
+                    // This is not supposed to happen
+                    throw new DriverInternalError(e);
+                }
+                catch (InterruptedException e)
+                {
+                    Thread.currentThread().interrupt();
+                }
+            }
         }
 
         public Connection.Factory connectionFactory() {
@@ -282,7 +329,15 @@ public class Session {
             return cluster.manager.configuration;
         }
 
-        public ExecutorService executor() {
+        LoadBalancingPolicy loadBalancingPolicy() {
+            return cluster.manager.loadBalancingPolicy();
+        }
+
+        ReconnectionPolicy reconnectionPolicy() {
+            return cluster.manager.reconnectionPolicy();
+        }
+
+        public ListeningExecutorService executor() {
             return cluster.manager.executor;
         }
 
@@ -291,35 +346,48 @@ public class Session {
             if (!isShutdown.compareAndSet(false, true))
                 return true;
 
-            long start = System.currentTimeMillis();
+            long start = System.nanoTime();
             boolean success = true;
             for (HostConnectionPool pool : pools.values())
                 success &= pool.shutdown(timeout - Cluster.timeSince(start, unit), unit);
             return success;
         }
 
-        private void addOrRenewPool(Host host) {
-            try {
-                HostDistance distance = loadBalancer.distance(host);
-                if (distance != HostDistance.IGNORED) {
+        private ListenableFuture<?> addOrRenewPool(final Host host) {
+            final HostDistance distance = cluster.manager.loadBalancingPolicy().distance(host);
+            if (distance == HostDistance.IGNORED)
+                return Futures.immediateFuture(null);
+
+            // Creating a pool is somewhat long since it has to create the connection, so do it asynchronously.
+            return executor().submit(new Runnable() {
+                public void run() {
                     logger.debug("Adding {} to list of queried hosts", host);
-                    HostConnectionPool previous = pools.put(host, new HostConnectionPool(host, distance, this));
-                    if (previous != null)
-                        previous.shutdown(); // The previous was probably already shutdown but that's ok
+                    try {
+                        HostConnectionPool previous = pools.put(host, new HostConnectionPool(host, distance, Session.Manager.this));
+                        if (previous != null)
+                            previous.shutdown(); // The previous was probably already shutdown but that's ok
+                    } catch (AuthenticationException e) {
+                        logger.error("Error creating pool to {} ({})", host, e.getMessage());
+                        cluster.manager.signalConnectionFailure(host, new ConnectionException(e.getHost(), e.getMessage()));
+                    } catch (ConnectionException e) {
+                        logger.debug("Error creating pool to {} ({})", host, e.getMessage());
+                        cluster.manager.signalConnectionFailure(host, e);
+                    }
                 }
-            } catch (AuthenticationException e) {
-                logger.error("Error creating pool to {} ({})", host, e.getMessage());
-                host.getMonitor().signalConnectionFailure(new ConnectionException(e.getHost(), e.getMessage()));
-            } catch (ConnectionException e) {
-                logger.debug("Error creating pool to {} ({})", host, e.getMessage());
-                host.getMonitor().signalConnectionFailure(e);
-            }
+            });
         }
 
-        private void removePool(Host host) {
-            HostConnectionPool pool = pools.remove(host);
-            if (pool != null)
-                pool.shutdown();
+        ListenableFuture<?> removePool(Host host) {
+            final HostConnectionPool pool = pools.remove(host);
+            if (pool == null)
+                return Futures.immediateFuture(null);
+
+            // Shutdown can take some time and we don't care about holding the thread on that.
+            return executor().submit(new Runnable() {
+                public void run() {
+                    pool.shutdown();
+                }
+            });
         }
 
         /*
@@ -333,11 +401,11 @@ public class Session {
          */
         private void updateCreatedPools() {
             for (Host h : cluster.getMetadata().allHosts()) {
-                HostDistance dist = loadBalancer.distance(h);
+                HostDistance dist = loadBalancingPolicy().distance(h);
                 HostConnectionPool pool = pools.get(h);
 
                 if (pool == null) {
-                    if (dist != HostDistance.IGNORED && h.getMonitor().isUp())
+                    if (dist != HostDistance.IGNORED && h.isUp())
                         addOrRenewPool(h);
                 } else if (dist != pool.hostDistance) {
                     if (dist == HostDistance.IGNORED) {
@@ -349,35 +417,44 @@ public class Session {
             }
         }
 
+        @Override
         public void onUp(Host host) {
-            addOrRenewPool(host);
-            loadBalancer.onUp(host);
-            updateCreatedPools();
+            addOrRenewPool(host).addListener(new Runnable() {
+                public void run() {
+                    updateCreatedPools();
+                }
+            }, MoreExecutors.sameThreadExecutor());
         }
 
+        @Override
         public void onDown(Host host) {
-            loadBalancer.onDown(host);
             // Note that with well behaved balancing policy (that ignore dead nodes), the removePool call is not necessary
             // since updateCreatedPools should take care of it. But better protect against non well behaving policies.
-            removePool(host);
-            updateCreatedPools();
+            removePool(host).addListener(new Runnable() {
+                public void run() {
+                    updateCreatedPools();
+                }
+            }, MoreExecutors.sameThreadExecutor());
         }
 
+        @Override
         public void onAdd(Host host) {
-            addOrRenewPool(host);
-            loadBalancer.onAdd(host);
-            updateCreatedPools();
+            onUp(host);
         }
 
+        @Override
         public void onRemove(Host host) {
-            loadBalancer.onRemove(host);
-            removePool(host);
-            updateCreatedPools();
+            onDown(host);
         }
 
         public void setKeyspace(String keyspace) {
+            long timeout = configuration().getSocketOptions().getConnectTimeoutMillis();
             try {
-                Uninterruptibles.getUninterruptibly(executeQuery(new QueryMessage("use " + keyspace, ConsistencyLevel.DEFAULT_CASSANDRA_CL), Query.DEFAULT));
+                Future<?> future = executeQuery(new QueryMessage("use " + keyspace, ConsistencyLevel.DEFAULT_CASSANDRA_CL), Query.DEFAULT);
+                // Note: using the connection timeout is perfectly correct, we should probably change that someday
+                Uninterruptibles.getUninterruptibly(future, timeout, TimeUnit.MILLISECONDS);
+            } catch (TimeoutException e) {
+                throw new DriverInternalError(String.format("No responses after %d milliseconds while setting current keyspace. This should not happen, unless you have setup a very low connection timeout.", timeout));
             } catch (ExecutionException e) {
                 ResultSetFuture.extractCauseFromExecutionException(e);
             }

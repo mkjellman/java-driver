@@ -1,6 +1,58 @@
 CHANGELOG
 =========
 
+* 1.0.3:
+  - [api] The query builder now correctly throw an exception when give a value
+    of type it doesn't know about.
+  - [new] SocketOptions#setReadTimeout allows to set a timeout on how long we
+    wait for the answer of one node. See the javadoc for more details.
+  - [new] New Session#prepare method that takes a Statement.
+  - [bug] Always take per-query CL, tracing, etc. into account for QueryBuilder
+    statements (JAVA-143).
+
+
+* 1.0.2:
+  - [api] Host#getMonitor and all Host.HealthMonitor methods have been
+    deprecated. The new Host#isUp method is now prefered to the method
+    in the monitor and you should now register Host.StateListener against
+    the Cluster object directly (registering against a host HealthMonitor
+    was much more limited anyway).
+  - [new] New serialize/deserialize methods in DataType to serialize/deserialize
+    values to/from bytes (JAVA-92).
+  - [new] New getIndexOf() method in ColumnDefinitions to find the index of
+    a given column name (JAVA-128).
+  - [bug] Fix a bug when thread could get blocked while setting the current
+    keyspace (JAVA-131).
+  - [bug] Quote inet addresses in the query builder since CQL3 requires it
+    (JAVA-136)
+
+* 1.0.1:
+  - [api] Function call handling in the query builder has been modified in a
+    backward incompatible way. Function calls are not parsed from string values
+    anymore as this wasn't safe. Instead the new 'fcall' method should be used
+    (JAVA-100).
+  - [api] Some typos in method names in PoolingOptions have been fixed in a
+    backward incompatible way before the API get widespread.
+  - [bug] Don't destroy composite partition key with BoundStatement and
+    TokenAwarePolicy (JAVA-123).
+  - [new] null values support in the query builder.
+  - [new] SSL support (requires C* >= 1.2.1) (JAVA-5).
+  - [new] Allow generating unlogged batch in the query builder (JAVA-113).
+  - [improvement] Better error message when no host are available.
+  - [improvement] Improves performance of the stress example application been.
+
+* 1.0.0:
+  - [api] The AuthInfoProvider has be (temporarily) removed. Instead, the
+    Cluster builder has a new withCredentials() method to provide a username
+    and password for use with Cassandra's PasswordAuthenticator. Custom
+    authenticator will be re-introduced in a future version but are not
+    supported at the moment.
+  - [api] The isMetricsEnabled() method in Configuration has been replaced by
+    getMetricsOptions(). An option to disabled JMX reporting (on by default)
+    has been added.
+  - [bug] Don't make default load balancing policy a static singleton since it
+    is stateful (JAVA-91).
+
 * 1.0.0-RC1:
   - [new] Null values are now supported in BoundStatement (but you will need at
     least Cassandra 1.2.3 for it to work). The API of BoundStatement has been
@@ -27,7 +79,6 @@ CHANGELOG
   - [bug] Fix failover bug in DCAwareRoundRobinPolicy (JAVA-62)
   - [bug] Fix use of bind markers for routing keys in the query builder
     (JAVA-66)
-
 
 * 1.0.0-beta1:
   - initial release

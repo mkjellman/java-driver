@@ -21,6 +21,8 @@ package com.datastax.driver.core.exceptions;
  */
 public class UnauthorizedException extends QueryValidationException {
 
+    private static final long serialVersionUID = 0;
+
     public UnauthorizedException(String msg) {
         super(msg);
     }
@@ -29,6 +31,7 @@ public class UnauthorizedException extends QueryValidationException {
         super(msg, cause);
     }
 
+    @Override
     public DriverException copy() {
         return new UnauthorizedException(getMessage(), this);
     }

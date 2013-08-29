@@ -54,7 +54,6 @@ class RequestHandler implements Connection.ResponseCallback {
 
     private final Session.Manager manager;
     private final Callback callback;
-    private final TimerContext timerContext;
 
     private final Iterator<Host> queryPlan;
     private final Query query;
@@ -67,16 +66,27 @@ class RequestHandler implements Connection.ResponseCallback {
 
     private volatile Map<InetAddress, String> errors;
 
+    private volatile boolean isCanceled;
+    private volatile Connection.ResponseHandler connectionHandler;
+
+    private final TimerContext timerContext;
+
     public RequestHandler(Session.Manager manager, Callback callback, Query query) {
         this.manager = manager;
         this.callback = callback;
 
-        this.queryPlan = manager.loadBalancer.newQueryPlan(query);
+        callback.register(this);
+
+        this.queryPlan = manager.loadBalancingPolicy().newQueryPlan(query);
         this.query = query;
 
-        this.timerContext = manager.configuration().isMetricsEnabled()
+        this.timerContext = metricsEnabled()
                           ? metrics().getRequestsTimer().time()
                           : null;
+    }
+
+    private boolean metricsEnabled() {
+        return manager.configuration().getMetricsOptions() != null;
     }
 
     private Metrics metrics() {
@@ -85,7 +95,7 @@ class RequestHandler implements Connection.ResponseCallback {
 
     public void sendRequest() {
 
-        while (queryPlan.hasNext()) {
+        while (queryPlan.hasNext() && !isCanceled) {
             Host host = queryPlan.next();
             if (query(host))
                 return;
@@ -109,11 +119,11 @@ class RequestHandler implements Connection.ResponseCallback {
                 triedHosts.add(current);
             }
             current = host;
-            connection.write(this);
+            connectionHandler = connection.write(this);
             return true;
         } catch (ConnectionException e) {
             // If we have any problem with the connection, move to the next node.
-            if (manager.configuration().isMetricsEnabled())
+            if (metricsEnabled())
                 metrics().getErrorMetrics().getConnectionErrors().inc();
             if (connection != null)
                 currentPool.returnConnection(connection);
@@ -127,7 +137,7 @@ class RequestHandler implements Connection.ResponseCallback {
             return false;
         } catch (TimeoutException e) {
             // We timeout, log it but move to the next node.
-            logError(host.getAddress(), "Timeout while trying to acquire available connection");
+            logError(host.getAddress(), "Timeout while trying to acquire available connection (you may want to increase the driver number of per-host connections)");
             return false;
         } catch (RuntimeException e) {
             if (connection != null)
@@ -151,6 +161,7 @@ class RequestHandler implements Connection.ResponseCallback {
 
         // We should not retry on the current thread as this will be an IO thread.
         manager.executor().execute(new Runnable() {
+            @Override
             public void run() {
                 if (retryCurrent) {
                     if (query(h))
@@ -161,6 +172,13 @@ class RequestHandler implements Connection.ResponseCallback {
         });
     }
 
+    public void cancel() {
+        isCanceled = true;
+        if (connectionHandler != null)
+            connectionHandler.cancelHandler();
+    }
+
+    @Override
     public Message.Request request() {
 
         Message.Request request = callback.request();
@@ -201,14 +219,19 @@ class RequestHandler implements Connection.ResponseCallback {
         callback.onException(connection, exception);
     }
 
-    public void onSet(Connection connection, Message.Response response) {
-
+    private void returnConnection(Connection connection) {
         if (currentPool == null) {
             // This should not happen but is probably not reason to fail completely
             logger.error("No current pool set; this should not happen");
         } else {
             currentPool.returnConnection(connection);
         }
+    }
+
+    @Override
+    public void onSet(Connection connection, Message.Response response) {
+
+        returnConnection(connection);
 
         try {
             switch (response.type) {
@@ -224,7 +247,7 @@ class RequestHandler implements Connection.ResponseCallback {
                     switch (err.error.code()) {
                         case READ_TIMEOUT:
                             assert err.error instanceof ReadTimeoutException;
-                            if (manager.configuration().isMetricsEnabled())
+                            if (metricsEnabled())
                                 metrics().getErrorMetrics().getReadTimeouts().inc();
 
                             ReadTimeoutException rte = (ReadTimeoutException)err.error;
@@ -233,7 +256,7 @@ class RequestHandler implements Connection.ResponseCallback {
                             break;
                         case WRITE_TIMEOUT:
                             assert err.error instanceof WriteTimeoutException;
-                            if (manager.configuration().isMetricsEnabled())
+                            if (metricsEnabled())
                                 metrics().getErrorMetrics().getWriteTimeouts().inc();
 
                             WriteTimeoutException wte = (WriteTimeoutException)err.error;
@@ -242,7 +265,7 @@ class RequestHandler implements Connection.ResponseCallback {
                             break;
                         case UNAVAILABLE:
                             assert err.error instanceof UnavailableException;
-                            if (manager.configuration().isMetricsEnabled())
+                            if (metricsEnabled())
                                 metrics().getErrorMetrics().getUnavailables().inc();
 
                             UnavailableException ue = (UnavailableException)err.error;
@@ -253,7 +276,7 @@ class RequestHandler implements Connection.ResponseCallback {
                             // Try another node
                             logger.warn("Host {} is overloaded, trying next host.", connection.address);
                             logError(connection.address, "Host overloaded");
-                            if (manager.configuration().isMetricsEnabled())
+                            if (metricsEnabled())
                                 metrics().getErrorMetrics().getOthers().inc();
                             retry(false, null);
                             return;
@@ -261,7 +284,7 @@ class RequestHandler implements Connection.ResponseCallback {
                             // Try another node
                             logger.error("Query sent to {} but it is bootstrapping. This shouldn't happen but trying next host.", connection.address);
                             logError(connection.address, "Host is boostrapping");
-                            if (manager.configuration().isMetricsEnabled())
+                            if (metricsEnabled())
                                 metrics().getErrorMetrics().getOthers().inc();
                             retry(false, null);
                             return;
@@ -302,7 +325,7 @@ class RequestHandler implements Connection.ResponseCallback {
                             // we're done for now, the prepareAndRetry callback will handle the rest
                             return;
                         default:
-                            if (manager.configuration().isMetricsEnabled())
+                            if (metricsEnabled())
                                 metrics().getErrorMetrics().getOthers().inc();
                             break;
                     }
@@ -315,7 +338,7 @@ class RequestHandler implements Connection.ResponseCallback {
                                 ++queryRetries;
                                 if (logger.isTraceEnabled())
                                     logger.trace("Doing retry {} for query {} at consistency {}", new Object[]{ queryRetries, query, retry.getRetryConsistencyLevel()});
-                                if (manager.configuration().isMetricsEnabled())
+                                if (metricsEnabled())
                                     metrics().getErrorMetrics().getRetries().inc();
                                 retry(true, retry.getRetryConsistencyLevel());
                                 break;
@@ -323,7 +346,7 @@ class RequestHandler implements Connection.ResponseCallback {
                                 setFinalResult(connection, response);
                                 break;
                             case IGNORE:
-                                if (manager.configuration().isMetricsEnabled())
+                                if (metricsEnabled())
                                     metrics().getErrorMetrics().getIgnores().inc();
                                 setFinalResult(connection, new ResultMessage.Void());
                                 break;
@@ -342,10 +365,12 @@ class RequestHandler implements Connection.ResponseCallback {
     private Connection.ResponseCallback prepareAndRetry(final String toPrepare) {
         return new Connection.ResponseCallback() {
 
+            @Override
             public Message.Request request() {
                 return new PrepareMessage(toPrepare);
             }
 
+            @Override
             public void onSet(Connection connection, Message.Response response) {
                 // TODO should we check the response ?
                 switch (response.type) {
@@ -360,7 +385,7 @@ class RequestHandler implements Connection.ResponseCallback {
                         break;
                     case ERROR:
                         logError(connection.address, "Error preparing query, got " + response);
-                        if (manager.configuration().isMetricsEnabled())
+                        if (metricsEnabled())
                             metrics().getErrorMetrics().getOthers().inc();
                         retry(false, null);
                         break;
@@ -371,25 +396,26 @@ class RequestHandler implements Connection.ResponseCallback {
                 }
             }
 
+            @Override
             public void onException(Connection connection, Exception exception) {
                 RequestHandler.this.onException(connection, exception);
+            }
+
+            @Override
+            public void onTimeout(Connection connection) {
+                logError(connection.address, "Timeout waiting for response to prepare message");
+                retry(false, null);
             }
         };
     }
 
+    @Override
     public void onException(Connection connection, Exception exception) {
 
-        if (connection != null) {
-            if (currentPool == null) {
-                // This should not happen but is probably not reason to fail completely
-                logger.error("No current pool set; this should not happen");
-            } else {
-                currentPool.returnConnection(connection);
-            }
-        }
+        returnConnection(connection);
 
         if (exception instanceof ConnectionException) {
-            if (manager.configuration().isMetricsEnabled())
+            if (metricsEnabled())
                 metrics().getErrorMetrics().getConnectionErrors().inc();
             ConnectionException ce = (ConnectionException)exception;
             logError(ce.address, ce.getMessage());
@@ -400,7 +426,15 @@ class RequestHandler implements Connection.ResponseCallback {
         setFinalException(connection, exception);
     }
 
+    @Override
+    public void onTimeout(Connection connection) {
+        returnConnection(connection);
+        logError(connection.address, "Timeout during read");
+        retry(false, null);
+    }
+
     interface Callback extends Connection.ResponseCallback {
         public void onSet(Connection connection, Message.Response response, ExecutionInfo info);
+        public void register(RequestHandler handler);
     }
 }

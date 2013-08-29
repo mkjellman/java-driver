@@ -35,6 +35,9 @@ import java.util.UUID;
 import org.testng.annotations.Test;
 import static org.testng.Assert.*;
 
+import com.datastax.driver.core.exceptions.InvalidTypeException;
+
+
 /**
  * Tests DataType class to ensure data sent in is the same as data received
  * All tests are executed via a Simple Statement
@@ -70,6 +73,7 @@ public class DataTypeTest extends CCMBridge.PerClassSingleNodeCluster {
     /**
      * Generates the table definitions that will be used in testing
      */
+    @Override
     protected Collection<String> getTableDefinitions() {
         ArrayList<String> tableDefinitions = new ArrayList<String>();
 
@@ -375,11 +379,6 @@ public class DataTypeTest extends CCMBridge.PerClassSingleNodeCluster {
         return selectStatements;
     }
 
-
-
-
-
-
     /**
      * Test simple statement inserts for all primitive data types
      */
@@ -415,7 +414,7 @@ public class DataTypeTest extends CCMBridge.PerClassSingleNodeCluster {
     /**
      * Test simple statement inserts and selects for all primitive data types
      */
-    @Test(groups = "integration")
+    @Test(groups = "long")
     public void primitiveTests() throws Throwable {
         primitiveInsertTest();
         primitiveSelectTest();
@@ -475,46 +474,61 @@ public class DataTypeTest extends CCMBridge.PerClassSingleNodeCluster {
     /**
      * Test simple statement inserts and selects for all collection data types
      */
-    @Test(groups = "integration")
+    @Test(groups = "long")
     public void collectionTest() throws Throwable {
         collectionInsertTest();
         collectionSelectTest();
     }
 
-    /**
-     * Test TTLs.
-     */
-    // TODO: @Test(groups = "integration")
-    public void ttlTest() throws Throwable {
+    // The two following tests a really unit tests, but since the whole uses
+    // CCMBridge.PerClassSingleNodeCluster, they'll still spawn a cluster even
+    // you execute only them, so we keep them in the "long" group. We could
+    // move them in another class but not sure where honestly (one could argue
+    // that it would make more sense to move all the *other* tests to some
+    // DataTypeIntegrationTest class).
+    @Test(groups = "long")
+    public void serializeDeserializeTest() {
 
+        for (DataType dt : DataType.allPrimitiveTypes())
+        {
+            if (exclude(dt))
+                continue;
+
+            Object value = TestUtils.getFixedValue(dt);
+            assertEquals(dt.deserialize(dt.serialize(value)), value);
+        }
+
+        try {
+            DataType.bigint().serialize(4);
+            fail("This should not have worked");
+        } catch (InvalidTypeException e) { /* That's what we want */ }
+
+        try {
+            ByteBuffer badValue = ByteBuffer.allocate(4);
+            DataType.bigint().deserialize(badValue);
+            fail("This should not have worked");
+        } catch (InvalidTypeException e) { /* That's what we want */ }
     }
 
-    /**
-     * Test Counters in an isolated format.
-     */
-    // TODO: @Test(groups = "integration")
-    public void countersTest() throws Throwable {
+    @Test(groups = "long")
+    public void serializeDeserializeCollectionsTest() {
 
+        List<String> l = Arrays.asList("foo", "bar");
+
+        DataType dt = DataType.list(DataType.text());
+        assertEquals(dt.deserialize(dt.serialize(l)), l);
+
+        try {
+            DataType.list(DataType.bigint()).serialize(l);
+            fail("This should not have worked");
+        } catch (InvalidTypeException e) { /* That's what we want */ }
     }
-
-    /**
-     * Test tombstones.
-     */
-    // TODO: @Test(groups = "integration")
-    public void tombstonesTest() throws Throwable {
-
-    }
-
-
-
-
-
 
     /**
      * Prints the table definitions that will be used in testing
      * (for exporting purposes)
      */
-    @Test(groups = { "doc" })
+    @Test(groups = "doc")
     public void printTableDefinitions() {
         String objective = "Table Definitions";
         System.out.println(String.format("Printing %s...", objective));
@@ -531,7 +545,7 @@ public class DataTypeTest extends CCMBridge.PerClassSingleNodeCluster {
      * Prints the sample data that will be used in testing
      * (for exporting purposes)
      */
-    @Test(groups = { "doc" })
+    @Test(groups = "doc")
     public void printSampleData() {
         String objective = "Sample Data";
         System.out.println(String.format("Printing %s...", objective));
@@ -548,7 +562,7 @@ public class DataTypeTest extends CCMBridge.PerClassSingleNodeCluster {
      * Prints the sample collections that will be used in testing
      * (for exporting purposes)
      */
-    @Test(groups = { "doc" })
+    @Test(groups = "doc")
     public void printSampleCollections() {
         String objective = "Sample Collections";
         System.out.println(String.format("Printing %s...", objective));
@@ -578,7 +592,7 @@ public class DataTypeTest extends CCMBridge.PerClassSingleNodeCluster {
      * Prints the simple insert statements that will be used in testing
      * (for exporting purposes)
      */
-    @Test(groups = { "doc" })
+    @Test(groups = "doc")
     public void printPrimitiveInsertStatements() {
         String objective = "Primitive Insert Statements";
         System.out.println(String.format("Printing %s...", objective));
@@ -594,7 +608,7 @@ public class DataTypeTest extends CCMBridge.PerClassSingleNodeCluster {
      * Prints the simple select statements that will be used in testing
      * (for exporting purposes)
      */
-    @Test(groups = { "doc" })
+    @Test(groups = "doc")
     public void printPrimitiveSelectStatements() {
         String objective = "Primitive Select Statements";
         System.out.println(String.format("Printing %s...", objective));
@@ -610,7 +624,7 @@ public class DataTypeTest extends CCMBridge.PerClassSingleNodeCluster {
      * Prints the simple insert statements that will be used in testing
      * (for exporting purposes)
      */
-    @Test(groups = { "doc" })
+    @Test(groups = "doc")
     public void printCollectionInsertStatements() {
         String objective = "Collection Insert Statements";
         System.out.println(String.format("Printing %s...", objective));
@@ -626,7 +640,7 @@ public class DataTypeTest extends CCMBridge.PerClassSingleNodeCluster {
      * Prints the simple insert statements that will be used in testing
      * (for exporting purposes)
      */
-    @Test(groups = { "doc" })
+    @Test(groups = "doc")
     public void printCollectionSelectStatements() {
         String objective = "Collection Select Statements";
         System.out.println(String.format("Printing %s...", objective));
