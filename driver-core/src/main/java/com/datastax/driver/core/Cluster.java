@@ -289,8 +289,8 @@ public class Cluster {
         private SSLOptions sslOptions = null;
         private boolean metricsEnabled = true;
         private boolean jmxEnabled = true;
-        private final PoolingOptions poolingOptions = new PoolingOptions();
-        private final SocketOptions socketOptions = new SocketOptions();
+        private PoolingOptions poolingOptions = null;
+        private SocketOptions socketOptions = null;
 
         @Override
         public List<InetAddress> getContactPoints() {
@@ -511,8 +511,22 @@ public class Cluster {
          * can use the returned object to define the initial pooling options
          * for the built cluster.
          */
-        public PoolingOptions poolingOptions() {
+        public PoolingOptions getPoolingOptions() {
             return poolingOptions;
+        }
+
+        /**
+         * Configures the pooling options to use for the new cluster.
+         * <p>
+         * If no pooling options are set thru thus method,
+         * defaults from {@link PoolingOptions} will be used instead.
+         *
+         * @param poolingOptions the pooling options to use
+         * @return this Builder
+         */
+        public Builder withPollingOptions(PoolingOptions poolingOptions) {
+            this.poolingOptions = poolingOptions;
+            return this;
         }
 
         /**
@@ -522,8 +536,22 @@ public class Cluster {
          * can use the returned object to define the initial socket options
          * for the built cluster.
          */
-        public SocketOptions socketOptions() {
+        public SocketOptions getSocketOptions() {
             return socketOptions;
+        }
+
+        /**
+         * Configures the socket options to use for the new cluster.
+         * <p>
+         * If no socket options are set thru thus method,
+         * defaults from {@link SocketOptions} will be used instead.
+         *
+         * @param socketOptions the socket options to use
+         * @return this Builder
+         */
+        public Builder withSocketOptions(SocketOptions socketOptions) {
+            this.socketOptions = socketOptions;
+            return this;
         }
 
         /**
@@ -542,6 +570,11 @@ public class Cluster {
                 reconnectionPolicy == null ? Policies.defaultReconnectionPolicy() : reconnectionPolicy,
                 retryPolicy == null ? Policies.defaultRetryPolicy() : retryPolicy
             );
+            if(socketOptions == null)
+                socketOptions = new SocketOptions();
+            if(poolingOptions == null)
+                poolingOptions = new PoolingOptions();
+
             return new Configuration(policies,
                                      new ProtocolOptions(port, sslOptions).setCompression(compression),
                                      poolingOptions,
