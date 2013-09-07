@@ -2,13 +2,14 @@ CHANGELOG
 =========
 
 * 1.0.3:
-  - [api] The query builder now correctly throw an exception when give a value
-    of type it doesn't know about.
+  - [api] The query builder now correctly throw an exception when given a value
+    of a type it doesn't know about.
   - [new] SocketOptions#setReadTimeout allows to set a timeout on how long we
     wait for the answer of one node. See the javadoc for more details.
   - [new] New Session#prepare method that takes a Statement.
   - [bug] Always take per-query CL, tracing, etc. into account for QueryBuilder
     statements (JAVA-143).
+  - [bug] Temporary fixup for TimestampType when talking to C* 2.0 nodes.
 
 
 * 1.0.2:
