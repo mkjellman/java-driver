@@ -173,6 +173,7 @@ class RequestHandler implements Connection.ResponseCallback {
     }
 
     public void cancel() {
+	logger.info("Request canceled for host: " + current.getAddress());
         isCanceled = true;
         if (connectionHandler != null)
             connectionHandler.cancelHandler();
