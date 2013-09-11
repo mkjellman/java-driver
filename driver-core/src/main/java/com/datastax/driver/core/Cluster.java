@@ -510,22 +510,27 @@ public class Cluster {
          * @return the pooling options that will be used by this builder. You
          * can use the returned object to define the initial pooling options
          * for the built cluster.
+         *
+         * @deprecated you are now encouraged to use the {@link #withPoolingOptions}
+         * method. This method is deprecated and will be removed in the next major
+         * version of the driver.
          */
-        public PoolingOptions getPoolingOptions() {
+        @Deprecated
+        public PoolingOptions poolingOptions() {
             return poolingOptions;
         }
 
         /**
-         * Configures the pooling options to use for the new cluster.
+         * Set the PoolingOptions to use for the newly created Cluster.
          * <p>
-         * If no pooling options are set thru thus method,
-         * defaults from {@link PoolingOptions} will be used instead.
+         * If no pooling options are set through this method, default pooling
+         * options will be used.
          *
-         * @param poolingOptions the pooling options to use
-         * @return this Builder
+         * @param options the pooling options to use.
+         * @return this builder.
          */
-        public Builder withPollingOptions(PoolingOptions poolingOptions) {
-            this.poolingOptions = poolingOptions;
+        public Builder withPoolingOptions(PoolingOptions options) {
+            this.poolingOptions = options;
             return this;
         }
 
@@ -535,22 +540,27 @@ public class Cluster {
          * @return the socket options that will be used by this builder. You
          * can use the returned object to define the initial socket options
          * for the built cluster.
+         *
+         * @deprecated you are now encouraged to use the {@link #withPoolingOptions}
+         * method. This method is deprecated and will be removed in the next major
+         * version of the driver.
          */
-        public SocketOptions getSocketOptions() {
+        @Deprecated
+        public SocketOptions socketOptions() {
             return socketOptions;
         }
 
         /**
-         * Configures the socket options to use for the new cluster.
+         * Set the SocketOptions to use for the newly created Cluster.
          * <p>
-         * If no socket options are set thru thus method,
-         * defaults from {@link SocketOptions} will be used instead.
+         * If no socket options are set through this method, default socket
+         * options will be used.
          *
-         * @param socketOptions the socket options to use
-         * @return this Builder
+         * @param options the socket options to use.
+         * @return this builder.
          */
-        public Builder withSocketOptions(SocketOptions socketOptions) {
-            this.socketOptions = socketOptions;
+        public Builder withSocketOptions(SocketOptions options) {
+            this.socketOptions = options;
             return this;
         }
 
