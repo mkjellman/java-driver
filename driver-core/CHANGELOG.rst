@@ -7,6 +7,21 @@ CHANGELOG
 - [api] The Cluster.Builder#poolingOptions and Cluster.Builder#socketOptions
   are now deprecated. They are replaced by the new withPoolingOptions and
   withSocketOptions methods (JAVA-163).
+- [new] A new LatencyAwarePolicy wrapping policy has been added, allowing to
+  add latency awareness to a wrapped load balancing policy (JAVA-129).
+- [new] Allow defering cluster initialization (Cluster.Builder#deferInitialization)
+  (JAVA-161)
+- [new] Add truncate statement in query builder (JAVA-117).
+- [new] Support empty IN in the query builder (JAVA-106).
+- [bug] Fix spurious "No current pool set; this should not happen" error
+  message (JAVA-166)
+- [bug] Fix potential overflow in RoundRobinPolicy and correctly errors if
+  a balancing policy throws (JAVA-184)
+- [bug] Don't release Stream ID for timeouted queries (unless we do get back
+  the response)
+- [bug] Correctly escape identifiers and use fully qualified table names when
+  exporting schema as string.
+
 
 1.0.3:
 ------

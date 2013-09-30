@@ -59,7 +59,6 @@ import org.slf4j.LoggerFactory;
  */
 class Connection extends org.apache.cassandra.transport.Connection
 {
-    public static final int MAX_STREAM_PER_CONNECTION = 128;
 
     private static final Logger logger = LoggerFactory.getLogger(Connection.class);
 
@@ -188,6 +187,10 @@ class Connection extends org.apache.cassandra.transport.Connection
         return isDefunct;
     }
 
+    public int maxAvailableStreams() {
+        return dispatcher.streamIdHandler.maxAvailableStreams();
+    }
+
     public ConnectionException lastException() {
         return exception;
     }
@@ -275,12 +278,12 @@ class Connection extends org.apache.cassandra.transport.Connection
          * never leave a handler that won't get an answer or be errored out.
          */
         if (isDefunct) {
-            dispatcher.removeHandler(handler.streamId);
+            dispatcher.removeHandler(handler.streamId, true);
             throw new ConnectionException(address, "Write attempt on defunct connection");
         }
 
         if (isClosed) {
-            dispatcher.removeHandler(handler.streamId);
+            dispatcher.removeHandler(handler.streamId, true);
             throw new ConnectionException(address, "Connection has been closed");
         }
 
@@ -298,11 +301,10 @@ class Connection extends org.apache.cassandra.transport.Connection
                 writer.decrementAndGet();
 
                 if (!writeFuture.isSuccess()) {
-
                     logger.debug("[{}] Error writing request {}", name, request);
                     // Remove this handler from the dispatcher so it don't get notified of the error
                     // twice (we will fail that method already)
-                    dispatcher.removeHandler(handler.streamId);
+                    dispatcher.removeHandler(handler.streamId, true);
 
                     ConnectionException ce;
                     if (writeFuture.getCause() instanceof java.nio.channels.ClosedChannelException) {
@@ -310,7 +312,7 @@ class Connection extends org.apache.cassandra.transport.Connection
                     } else {
                         ce = new TransportException(address, "Error writing", writeFuture.getCause());
                     }
-                    handler.callback.onException(Connection.this, defunct(ce));
+                    handler.callback.onException(Connection.this, defunct(ce), System.nanoTime() - handler.startTime);
                 } else {
                     logger.trace("[{}] request sent successfully", name);
                 }
@@ -490,12 +492,19 @@ class Connection extends org.apache.cassandra.transport.Connection
             assert old == null;
         }
 
-        public void removeHandler(int streamId) {
+        public void removeHandler(int streamId, boolean releaseStreamId) {
+
+            // If we don't release the ID, mark first so that we can rely later on the fact that if
+            // we receive a response for an ID with no handler, it's that this ID has been marked.
+            if (!releaseStreamId)
+                streamIdHandler.mark(streamId);
+
             ResponseHandler handler = pending.remove(streamId);
             if (handler != null)
                 handler.cancelTimeout();
 
-            streamIdHandler.release(streamId);
+            if (releaseStreamId)
+                streamIdHandler.release(streamId);
         }
 
         @Override
@@ -526,12 +535,12 @@ class Connection extends org.apache.cassandra.transport.Connection
                      *   2) This request has timeouted. In that case, we've already switched to another host (or errored out
                      *      to the user). So log it for debugging purpose, but it's fine ignoring otherwise.
                      */
-                    if (!isDefunct())
-                        logger.debug("[{}] Response received on stream {} but no handler set anymore (the request must have timeouted). Received message is {}", name, streamId, response);
+                    streamIdHandler.unmark(streamId);
+                    logger.debug("[{}] Response received on stream {} but no handler set anymore (either the request has timeouted or it was closed due to another error). Received message is {}", name, streamId, response);
                     return;
                 }
                 handler.cancelTimeout();
-                handler.callback.onSet(Connection.this, response);
+                handler.callback.onSet(Connection.this, response, System.nanoTime() - handler.startTime);
             }
         }
 
@@ -551,7 +560,8 @@ class Connection extends org.apache.cassandra.transport.Connection
             Iterator<ResponseHandler> iter = pending.values().iterator();
             while (iter.hasNext())
             {
-                iter.next().callback.onException(Connection.this, ce);
+                ResponseHandler handler = iter.next();
+                handler.callback.onException(Connection.this, ce, System.nanoTime() - handler.startTime);
                 iter.remove();
             }
         }
@@ -587,18 +597,18 @@ class Connection extends org.apache.cassandra.transport.Connection
         }
 
         @Override
-        public void onSet(Connection connection, Message.Response response, ExecutionInfo info) {
-            onSet(connection, response);
+        public void onSet(Connection connection, Message.Response response, ExecutionInfo info, long latency) {
+            onSet(connection, response, latency);
         }
 
         @Override
-        public void onSet(Connection connection, Message.Response response) {
+        public void onSet(Connection connection, Message.Response response, long latency) {
             this.address = connection.address;
             super.set(response);
         }
 
         @Override
-        public void onException(Connection connection, Exception exception) {
+        public void onException(Connection connection, Exception exception, long latency) {
             // If all nodes are down, we will get a null connection here. This is fine, if we have
             // an exception, consumers shouldn't assume the address is not null.
             if (connection != null)
@@ -607,7 +617,7 @@ class Connection extends org.apache.cassandra.transport.Connection
         }
 
         @Override
-        public void onTimeout(Connection connection) {
+        public void onTimeout(Connection connection, long latency) {
             assert connection != null; // We always timeout on a specific connection, so this shouldn't be null
             this.address = connection.address;
             super.setException(new ConnectionException(connection.address, "Operation Timeouted"));
@@ -620,9 +630,9 @@ class Connection extends org.apache.cassandra.transport.Connection
 
     interface ResponseCallback {
         public Message.Request request();
-        public void onSet(Connection connection, Message.Response response);
-        public void onException(Connection connection, Exception exception);
-        public void onTimeout(Connection connection);
+        public void onSet(Connection connection, Message.Response response, long latency);
+        public void onException(Connection connection, Exception exception, long latency);
+        public void onTimeout(Connection connection, long latency);
     }
 
     static class ResponseHandler {
@@ -630,7 +640,9 @@ class Connection extends org.apache.cassandra.transport.Connection
         public final Connection connection;
         public final int streamId;
         public final ResponseCallback callback;
+
         private final Timeout timeout;
+        private final long startTime;
 
         public ResponseHandler(Connection connection, ResponseCallback callback) throws BusyConnectionException {
             this.connection = connection;
@@ -639,6 +651,8 @@ class Connection extends org.apache.cassandra.transport.Connection
 
             long timeoutMs = connection.factory.getReadTimeoutMillis();
             this.timeout = timeoutMs <= 0 ? null : connection.factory.timer.newTimeout(onTimeoutTask(), timeoutMs, TimeUnit.MILLISECONDS);
+
+            this.startTime = System.nanoTime();
         }
 
         void cancelTimeout() {
@@ -647,14 +661,18 @@ class Connection extends org.apache.cassandra.transport.Connection
         }
 
         public void cancelHandler() {
-            connection.dispatcher.removeHandler(streamId);
+            // We haven't really received a response: we want to remove the handle because we gave up on that
+            // request and there is no point in holding the handler, but we don't release the streamId. If we
+            // were, a new request could reuse that ID but get the answer to the request we just gave up on instead
+            // of its own answer, and we would have no way to detect that.
+            connection.dispatcher.removeHandler(streamId, false);
         }
 
         private TimerTask onTimeoutTask() {
             return new TimerTask() {
                 @Override
                 public void run(Timeout timeout) {
-                    callback.onTimeout(connection);
+                    callback.onTimeout(connection, System.nanoTime() - startTime);
                     cancelHandler();
                 }
             };
@@ -733,7 +751,9 @@ class Connection extends org.apache.cassandra.transport.Connection
             engine.setUseClientMode(true);
             engine.setEnabledCipherSuites(options.cipherSuites);
             ChannelPipeline pipeline = super.getPipeline();
-            pipeline.addFirst("ssl", new SslHandler(engine));
+            SslHandler handler = new SslHandler(engine);
+            handler.setCloseOnSSLException(true);
+            pipeline.addFirst("ssl", handler);
             return pipeline;
         }
     }

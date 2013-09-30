@@ -69,9 +69,14 @@ public class Cluster {
 
     final Manager manager;
 
-    private Cluster(List<InetAddress> contactPoints, Configuration configuration) {
+    // Note: we don't want to make init part of Configuration. In 2.0, the default is not init
+    // so there is not point in breaking Configuration API for that. However, as a workaround
+    // until upgrade, we still want to allow optional lazy initialization of the control
+    // connection (see #JAVA-161)
+    private Cluster(List<InetAddress> contactPoints, Configuration configuration, boolean init) {
         this.manager = new Manager(contactPoints, configuration);
-        this.manager.init();
+        if (init)
+            this.manager.init();
     }
 
     /**
@@ -98,7 +103,7 @@ public class Cluster {
         if (contactPoints.isEmpty())
             throw new IllegalArgumentException("Cannot build a cluster without contact points");
 
-        return new Cluster(contactPoints, initializer.getConfiguration());
+        return new Cluster(contactPoints, initializer.getConfiguration(), true);
     }
 
     /**
@@ -118,6 +123,7 @@ public class Cluster {
      * @return a new session on this cluster sets to no keyspace.
      */
     public Session connect() {
+        manager.init(); // Calls init if deferInitialization was used. It's a no-op if it's already initialized.
         return manager.newSession();
     }
 
@@ -147,6 +153,7 @@ public class Cluster {
      * @return the cluster metadata.
      */
     public Metadata getMetadata() {
+        manager.init(); // Calls init if deferInitialization was used. It's a no-op if it's already initialized.
         return manager.metadata;
     }
 
@@ -193,12 +200,53 @@ public class Cluster {
      * Unregisters the provided listener from being notified on hosts events.
      * <p>
      * This method is a no-op if {@code listener} hadn't previously be
-     * registered against this monitor.
+     * registered against this Cluster.
      *
      * @param listener the {@link Host.StateListener} to unregister.
+     * @return this {@code Cluster} object;
      */
-    public void unregister(Host.StateListener listener) {
+    public Cluster unregister(Host.StateListener listener) {
         manager.listeners.remove(listener);
+        return this;
+    }
+
+    /**
+     * Registers the provided tracker to be updated with hosts read
+     * latencies.
+     * <p>
+     * Registering the same listener multiple times is a no-op.
+     * <p>
+     * Be warry that the registered tracker {@code update} method will be call
+     * very frequently (at the end of every query to a Cassandra host) and
+     * should thus not be costly.
+     * <p>
+     * The main use case for a {@code LatencyTracker} is so
+     * {@link LoadBalancingPolicy} can implement latency awareness
+     * Typically, {@link LatencyAwarePolicy} registers  it's own internal
+     * {@code LatencyTracker} (automatically, you don't have to call this
+     * method directly).
+     *
+     * @param tracker the new {@link LatencyTracker} to register.
+     * @return this {@code Cluster} object;
+     */
+    public Cluster register(LatencyTracker tracker) {
+        manager.trackers.add(tracker);
+        return this;
+    }
+
+    /**
+     * Unregisters the provided latency tracking from being updated
+     * with host read latencies.
+     * <p>
+     * This method is a no-op if {@code tracker} hadn't previously be
+     * registered against this Cluster.
+     *
+     * @param tracker the {@link LatencyTracker} to unregister.
+     * @return this {@code Cluster} object;
+     */
+    public Cluster unregister(LatencyTracker tracker) {
+        manager.trackers.remove(tracker);
+        return this;
     }
 
     /**
@@ -296,6 +344,8 @@ public class Cluster {
         private boolean jmxEnabled = true;
         private PoolingOptions poolingOptions = null;
         private SocketOptions socketOptions = null;
+
+        private boolean deferInitialization = false;
 
         @Override
         public List<InetAddress> getContactPoints() {
@@ -570,6 +620,29 @@ public class Cluster {
         }
 
         /**
+         * Defer the initialization of the created cluster.
+         * <p>
+         * By default, building the cluster (calling the {@link #build} method of this object)
+         * triggers the creation of a connection to one of the contact points.
+         * That connection is then used to fetch the metadata on the Cassandra
+         * cluster we are connected to (other nodes, schema, ...). If this
+         * method is used, the creation of that connection will be deferred until the first
+         * call to {@code connect()} or {@code getMetadata()} on the resulting {@code Cluster}
+         * object.
+         * <p>
+         * This method is useful when it is not convenient to deal with connection problems
+         * while creating the Cluster object. Note that this method only exists
+         * in the 1.X branch of the driver since deferred initialization is the default on
+         * the 2.X branch.
+         *
+         * @return this builder.
+         */
+        public Builder withDeferredInitialization() {
+            this.deferInitialization = true;
+            return this;
+        }
+
+        /**
          * The configuration that will be used for the new cluster.
          * <p>
          * You <b>should not</b> modify this object directly because changes made
@@ -612,7 +685,11 @@ public class Cluster {
          * while contacting the initial contact points
          */
         public Cluster build() {
-            return Cluster.buildFrom(this);
+            List<InetAddress> contactPoints = getContactPoints();
+            if (contactPoints.isEmpty())
+                throw new IllegalArgumentException("Cannot build a cluster without contact points");
+
+            return new Cluster(contactPoints, getConfiguration(), !deferInitialization);
         }
     }
 
@@ -632,6 +709,8 @@ public class Cluster {
      * user to be able to call the {@link #onUp} and {@link #onDown} methods.
      */
     class Manager implements Host.StateListener, Connection.DefaultResponseHandler {
+
+        private final AtomicBoolean isInit = new AtomicBoolean(false);
 
         // Initial contacts point
         final List<InetAddress> contactPoints;
@@ -661,7 +740,8 @@ public class Cluster {
         // this would yield a slightly less clear behavior.
         final Map<MD5Digest, PreparedStatement> preparedQueries = new ConcurrentHashMap<MD5Digest, PreparedStatement>();
 
-        private final Set<Host.StateListener> listeners = new CopyOnWriteArraySet<Host.StateListener>();
+        final Set<Host.StateListener> listeners = new CopyOnWriteArraySet<Host.StateListener>();
+        final Set<LatencyTracker> trackers = new CopyOnWriteArraySet<LatencyTracker>();
 
         private Manager(List<InetAddress> contactPoints, Configuration configuration) {
             logger.debug("Starting new cluster with contact points " + contactPoints);
@@ -678,17 +758,19 @@ public class Cluster {
 
         }
 
-        // This is separated from the constructor because this reference the
-        // Cluster object, whose manager won't be properly initialized until
-        // the constructor returns.
         private void init() {
+            if (!isInit.compareAndSet(false, true))
+                return;
 
             // Note: we mark the initial contact point as UP, because we have no prior
             // notion of their state and no real way to know until we connect to them
             // (since the node status is not exposed by C* in the System tables). This
             // may not be correct.
-            for (InetAddress address : contactPoints)
-                addHost(address, false).setUp();
+            for (InetAddress address : contactPoints) {
+                Host host = addHost(address, false);
+                if (host != null)
+                    host.setUp();
+            }
 
             loadBalancingPolicy().init(Cluster.this, metadata.allHosts());
 
@@ -717,9 +799,17 @@ public class Cluster {
         }
 
         private Session newSession() {
+            init();
+
             Session session = new Session(Cluster.this, metadata.allHosts());
             sessions.add(session);
             return session;
+        }
+
+        void reportLatency(Host host, long latencyNanos) {
+            for (LatencyTracker tracker : trackers) {
+                tracker.update(host, latencyNanos);
+            }
         }
 
         private boolean shutdown(long timeout, TimeUnit unit) throws InterruptedException {
