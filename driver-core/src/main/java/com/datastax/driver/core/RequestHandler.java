@@ -16,33 +16,23 @@
 package com.datastax.driver.core;
 
 import java.net.InetAddress;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.Iterator;
-import java.util.List;
-import java.util.HashMap;
-import java.util.Map;
-import java.util.concurrent.TimeoutException;
+import java.util.*;
 import java.util.concurrent.TimeUnit;
-
-import com.datastax.driver.core.policies.RetryPolicy;
-import com.datastax.driver.core.exceptions.*;
-
-import org.apache.cassandra.transport.Message;
-import org.apache.cassandra.transport.messages.ErrorMessage;
-import org.apache.cassandra.transport.messages.ExecuteMessage;
-import org.apache.cassandra.transport.messages.PrepareMessage;
-import org.apache.cassandra.transport.messages.QueryMessage;
-import org.apache.cassandra.transport.messages.ResultMessage;
-import org.apache.cassandra.exceptions.UnavailableException;
-import org.apache.cassandra.exceptions.PreparedQueryNotFoundException;
-import org.apache.cassandra.exceptions.ReadTimeoutException;
-import org.apache.cassandra.exceptions.WriteTimeoutException;
+import java.util.concurrent.TimeoutException;
 
 import com.yammer.metrics.core.TimerContext;
-
+import org.apache.cassandra.exceptions.PreparedQueryNotFoundException;
+import org.apache.cassandra.exceptions.ReadTimeoutException;
+import org.apache.cassandra.exceptions.UnavailableException;
+import org.apache.cassandra.exceptions.WriteTimeoutException;
+import org.apache.cassandra.transport.Message;
+import org.apache.cassandra.transport.messages.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import com.datastax.driver.core.exceptions.DriverInternalError;
+import com.datastax.driver.core.exceptions.NoHostAvailableException;
+import com.datastax.driver.core.policies.RetryPolicy;
 
 /**
  * Handles a request to cassandra, dealing with host failover and retries on
@@ -52,7 +42,7 @@ class RequestHandler implements Connection.ResponseCallback {
 
     private static final Logger logger = LoggerFactory.getLogger(RequestHandler.class);
 
-    private final Session.Manager manager;
+    private final SessionManager manager;
     private final Callback callback;
 
     private final Iterator<Host> queryPlan;
@@ -72,7 +62,7 @@ class RequestHandler implements Connection.ResponseCallback {
     private final TimerContext timerContext;
     private final long startTime;
 
-    public RequestHandler(Session.Manager manager, Callback callback, Query query) {
+    public RequestHandler(SessionManager manager, Callback callback, Query query) {
         this.manager = manager;
         this.callback = callback;
 

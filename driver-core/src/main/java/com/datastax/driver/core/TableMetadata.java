@@ -20,10 +20,8 @@ import java.util.regex.Pattern;
 
 import com.google.common.base.Predicate;
 import com.google.common.collect.Iterables;
-
-import org.apache.cassandra.exceptions.RequestValidationException;
 import org.apache.cassandra.db.marshal.*;
-
+import org.apache.cassandra.exceptions.RequestValidationException;
 import org.codehaus.jackson.JsonFactory;
 import org.codehaus.jackson.map.ObjectMapper;
 
@@ -418,8 +416,7 @@ public class TableMetadata {
         return sb.toString();
     }
 
-    private StringBuilder appendClusteringOrder(StringBuilder sb)
-    {
+    private StringBuilder appendClusteringOrder(StringBuilder sb) {
         sb.append("CLUSTERING ORDER BY (");
         for (int i = 0; i < clusteringKey.size(); i++) {
             if (i > 0) sb.append(", ");
@@ -466,7 +463,6 @@ public class TableMetadata {
             sb.append('\n');
         return sb;
     }
-
 
     public static class Options {
 

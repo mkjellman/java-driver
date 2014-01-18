@@ -15,27 +15,23 @@
  */
 package com.datastax.driver.core;
 
+import javax.net.ssl.SSLEngine;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.util.Iterator;
-import java.util.HashMap;
-import java.util.Map;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
-import javax.net.ssl.SSLContext;
-import javax.net.ssl.SSLEngine;
 
 import com.google.common.collect.ImmutableMap;
-import com.google.common.util.concurrent.Uninterruptibles;
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
-
-import com.datastax.driver.core.exceptions.AuthenticationException;
-import com.datastax.driver.core.exceptions.DriverInternalError;
-
+import com.google.common.util.concurrent.Uninterruptibles;
 import org.apache.cassandra.service.ClientState;
-import org.apache.cassandra.transport.*;
-import org.apache.cassandra.transport.messages.*;
-
+import org.apache.cassandra.transport.Frame;
+import org.apache.cassandra.transport.Message;
+import org.apache.cassandra.transport.messages.CredentialsMessage;
+import org.apache.cassandra.transport.messages.ErrorMessage;
+import org.apache.cassandra.transport.messages.QueryMessage;
+import org.apache.cassandra.transport.messages.StartupMessage;
 import org.jboss.netty.bootstrap.ClientBootstrap;
 import org.jboss.netty.channel.*;
 import org.jboss.netty.channel.group.ChannelGroup;
@@ -46,9 +42,11 @@ import org.jboss.netty.handler.ssl.SslHandler;
 import org.jboss.netty.util.HashedWheelTimer;
 import org.jboss.netty.util.Timeout;
 import org.jboss.netty.util.TimerTask;
-
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import com.datastax.driver.core.exceptions.AuthenticationException;
+import com.datastax.driver.core.exceptions.DriverInternalError;
 
 // For LoggingHandler
 //import org.jboss.netty.handler.logging.LoggingHandler;
@@ -510,8 +508,9 @@ class Connection extends org.apache.cassandra.transport.Connection
         @Override
         public void messageReceived(ChannelHandlerContext ctx, MessageEvent e) {
             if (!(e.getMessage() instanceof Message.Response)) {
-                logger.error("[{}] Received unexpected message: {}", name, e.getMessage());
-                defunct(new TransportException(address, "Unexpected message received: " + e.getMessage()));
+                String msg = asDebugString(e.getMessage());
+                logger.error("[{}] Received unexpected message: {}", name, msg);
+                defunct(new TransportException(address, "Unexpected message received: " + msg));
             } else {
                 Message.Response response = (Message.Response)e.getMessage();
                 int streamId = response.getStreamId();
@@ -536,12 +535,27 @@ class Connection extends org.apache.cassandra.transport.Connection
                      *      to the user). So log it for debugging purpose, but it's fine ignoring otherwise.
                      */
                     streamIdHandler.unmark(streamId);
-                    logger.debug("[{}] Response received on stream {} but no handler set anymore (either the request has timeouted or it was closed due to another error). Received message is {}", name, streamId, response);
+                    if (logger.isDebugEnabled())
+                        logger.debug("[{}] Response received on stream {} but no handler set anymore (either the request has "
+                                   + "timeouted or it was closed due to another error). Received message is {}", name, streamId, asDebugString(response));
                     return;
                 }
                 handler.cancelTimeout();
                 handler.callback.onSet(Connection.this, response, System.nanoTime() - handler.startTime);
             }
+        }
+
+        // Make sure we don't print huge responses in debug/error logs.
+        private String asDebugString(Object obj)
+        {
+            if (obj == null)
+                return "null";
+
+            String msg = obj.toString();
+            if (msg.length() < 500)
+                return msg;
+
+            return msg.substring(0, 500) + "... [message of size " + msg.length() + " truncated]";
         }
 
         @Override

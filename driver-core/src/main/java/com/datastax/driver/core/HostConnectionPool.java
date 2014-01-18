@@ -15,11 +15,18 @@
  */
 package com.datastax.driver.core;
 
-import java.util.*;
-import java.util.concurrent.*;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Set;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CopyOnWriteArraySet;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.locks.*;
+import java.util.concurrent.locks.Condition;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -39,7 +46,7 @@ class HostConnectionPool {
 
     public final Host host;
     public volatile HostDistance hostDistance;
-    private final Session.Manager manager;
+    private final SessionManager manager;
 
     private final List<Connection> connections;
     private final AtomicInteger open;
@@ -54,7 +61,7 @@ class HostConnectionPool {
 
     private final AtomicInteger scheduledForCreation = new AtomicInteger();
 
-    public HostConnectionPool(Host host, HostDistance hostDistance, Session.Manager manager) throws ConnectionException {
+    public HostConnectionPool(Host host, HostDistance hostDistance, SessionManager manager) throws ConnectionException {
         assert hostDistance != HostDistance.IGNORED;
         this.host = host;
         this.hostDistance = hostDistance;
@@ -119,16 +126,26 @@ class HostConnectionPool {
         if (minInFlight >= options().getMaxSimultaneousRequestsPerConnectionThreshold(hostDistance) && connections.size() < options().getMaxConnectionsPerHost(hostDistance))
             maybeSpawnNewConnection();
 
-        while (true) {
-            int inFlight = leastBusy.inFlight.get();
+        if (leastBusy == null) {
+            // We could have raced with a shutdown since the last check
+            if (isShutdown.get())
+                throw new ConnectionException(host.getAddress(), "Pool is shutdown");
+            // This might maybe happen if the number of core connections per host is 0 and a connection was trashed between
+            // the previous check to connections and now. But in that case, the line above will have trigger the creation of
+            // a new connection, so just wait that connection and move on
+            leastBusy = waitForConnection(timeout, unit);
+        } else {
+            while (true) {
+                int inFlight = leastBusy.inFlight.get();
 
-            if (inFlight >= leastBusy.maxAvailableStreams()) {
-                leastBusy = waitForConnection(timeout, unit);
-                break;
+                if (inFlight >= leastBusy.maxAvailableStreams()) {
+                    leastBusy = waitForConnection(timeout, unit);
+                    break;
+                }
+
+                if (leastBusy.inFlight.compareAndSet(inFlight, inFlight + 1))
+                    break;
             }
-
-            if (leastBusy.inFlight.compareAndSet(inFlight, inFlight + 1))
-                break;
         }
         leastBusy.setKeyspace(manager.poolsState.keyspace);
         return leastBusy;
@@ -196,14 +213,18 @@ class HostConnectionPool {
                 }
             }
 
-            while (true) {
-                int inFlight = leastBusy.inFlight.get();
+            // If we race with shutdown, leastBusy could be null. In that case we just loop and we'll throw on the next
+            // iteration anyway
+            if (leastBusy != null) {
+                while (true) {
+                    int inFlight = leastBusy.inFlight.get();
 
-                if (inFlight >= leastBusy.maxAvailableStreams())
-                    break;
+                    if (inFlight >= leastBusy.maxAvailableStreams())
+                        break;
 
-                if (leastBusy.inFlight.compareAndSet(inFlight, inFlight + 1))
-                    return leastBusy;
+                    if (leastBusy.inFlight.compareAndSet(inFlight, inFlight + 1))
+                        return leastBusy;
+                }
             }
 
             remaining = timeout - Cluster.timeSince(start, unit);
