@@ -153,7 +153,12 @@ public class Cluster {
      */
     public Session connect(String keyspace) {
         SessionManager session = (SessionManager)connect();
-        session.setKeyspace(keyspace);
+        try {
+            session.setKeyspace(keyspace);
+        } catch (RuntimeException e) {
+            session.shutdown();
+            throw e;
+        }
         return session;
     }
 
@@ -298,6 +303,16 @@ public class Cluster {
             Thread.currentThread().interrupt();
             return false;
         }
+    }
+
+    /**
+     * Whether shutdown has been called on this Cluster instance.
+     *
+     * @return {@code true} if {@code shutdown} has been called on this instance,
+     * {@code false} otherwise.
+     */
+    public boolean isShutdown() {
+        return manager.isShutdown.get();
     }
 
     /**
@@ -735,7 +750,7 @@ public class Cluster {
      */
     class Manager implements Host.StateListener, Connection.DefaultResponseHandler {
 
-        private final AtomicBoolean isInit = new AtomicBoolean(false);
+        private boolean isInit;
 
         // Initial contacts point
         final List<InetAddress> contactPoints;
@@ -789,9 +804,12 @@ public class Cluster {
             this.configuration.register(this);
         }
 
-        private void init() {
-            if (!isInit.compareAndSet(false, true))
+        // Initialization is not too performance intensive and in practice there shouldn't be contention
+        // on it so synchronized is good enough.
+        private synchronized void init() {
+            if (isInit)
                 return;
+            isInit = true;
 
             // Note: we mark the initial contact point as UP, because we have no prior
             // notion of their state and no real way to know until we connect to them
@@ -815,6 +833,7 @@ public class Cluster {
                 }
                 throw e;
             }
+
         }
 
         Cluster getCluster() {
@@ -1016,6 +1035,23 @@ public class Cluster {
             if (isShutdown.get())
                 return;
 
+            // Adds to the load balancing first and foremost, as doing so might change the decision
+            // it will make for distance() on that node (not likely but we leave that possibility).
+            // This does mean the policy may start returning that node for query plan, but as long
+            // as no pools have been created (below) this will be ignored by RequestHandler so it's fine.
+            loadBalancingPolicy().onAdd(host);
+
+            // Next, if the host should be ignored, well, ignore it.
+            if (loadBalancingPolicy().distance(host) == HostDistance.IGNORED) {
+                // We still mark the node UP though as it should be (and notifiy the listeners).
+                // We'll mark it down if we have  a notification anyway and we've documented that especially
+                // for IGNORED hosts, the isUp() method was a best effort guess
+                host.setUp();
+                for (Host.StateListener listener : listeners)
+                    listener.onAdd(host);
+                return;
+            }
+
             try {
                 prepareAllQueries(host);
             } catch (InterruptedException e) {
@@ -1023,7 +1059,6 @@ public class Cluster {
                 // Don't propagate because we don't want to prevent other listener to run
             }
 
-            loadBalancingPolicy().onAdd(host);
             controlConnection.onAdd(host);
 
             List<ListenableFuture<Boolean>> futures = new ArrayList<ListenableFuture<Boolean>>(sessions.size());
@@ -1111,10 +1146,17 @@ public class Cluster {
             }
         }
 
-        public void addPrepared(PreparedStatement stmt) {
-            if (preparedQueries.putIfAbsent(stmt.id, stmt) != null)
+        public PreparedStatement addPrepared(PreparedStatement stmt) {
+            PreparedStatement previous = preparedQueries.putIfAbsent(stmt.id, stmt);
+            if (previous != null) {
                 logger.warn("Re-preparing already prepared query {}. Please note that preparing the same query more than once is "
                           + "generally an anti-pattern and will likely affect performance. Consider preparing the statement only once.", stmt.getQueryString());
+
+                // The one object in the cache will get GCed once it's not referenced by the client anymore since we use a weak reference.
+                // So we need to make sure that the instance we do return to the user is the one that is in the cache.
+                return previous;
+            }
+            return stmt;
         }
 
         private void prepareAllQueries(Host host) throws InterruptedException {

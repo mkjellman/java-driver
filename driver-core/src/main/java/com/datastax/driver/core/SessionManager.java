@@ -23,6 +23,7 @@ import java.util.Map;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import com.google.common.base.Function;
 import com.google.common.util.concurrent.*;
 import org.apache.cassandra.transport.Message;
 import org.apache.cassandra.transport.messages.*;
@@ -66,6 +67,10 @@ class SessionManager implements Session {
         }
     }
 
+    public String getLoggedKeyspace() {
+        return poolsState.keyspace;
+    }
+
     public ResultSet execute(String query) {
         return execute(new SimpleStatement(query));
     }
@@ -91,23 +96,43 @@ class SessionManager implements Session {
     }
 
     public PreparedStatement prepare(String query) {
+        try {
+            return Uninterruptibles.getUninterruptibly(prepareAsync(query));
+        } catch (ExecutionException e) {
+            throw DefaultResultSetFuture.extractCauseFromExecutionException(e);
+        }
+    }
+
+    public PreparedStatement prepare(Statement statement) {
+        try {
+            return Uninterruptibles.getUninterruptibly(prepareAsync(statement));
+        } catch (ExecutionException e) {
+            throw DefaultResultSetFuture.extractCauseFromExecutionException(e);
+        }
+    }
+
+    public ListenableFuture<PreparedStatement> prepareAsync(String query) {
         Connection.Future future = new Connection.Future(new PrepareMessage(query));
         execute(future, Query.DEFAULT);
         return toPreparedStatement(query, future);
     }
 
-    public PreparedStatement prepare(Statement statement) {
-        PreparedStatement prepared = prepare(statement.getQueryString());
+    public ListenableFuture<PreparedStatement> prepareAsync(final Statement statement) {
+        ListenableFuture<PreparedStatement> prepared = prepareAsync(statement.getQueryString());
+        return Futures.transform(prepared, new Function<PreparedStatement, PreparedStatement>() {
+            @Override
+            public PreparedStatement apply(PreparedStatement prepared) {
+                ByteBuffer routingKey = statement.getRoutingKey();
+                if (routingKey != null)
+                    prepared.setRoutingKey(routingKey);
+                prepared.setConsistencyLevel(statement.getConsistencyLevel());
+                if (statement.isTracing())
+                    prepared.enableTracing();
+                prepared.setRetryPolicy(statement.getRetryPolicy());
 
-        ByteBuffer routingKey = statement.getRoutingKey();
-        if (routingKey != null)
-            prepared.setRoutingKey(routingKey);
-        prepared.setConsistencyLevel(statement.getConsistencyLevel());
-        if (statement.isTracing())
-            prepared.enableTracing();
-        prepared.setRetryPolicy(statement.getRetryPolicy());
-
-        return prepared;
+                return prepared;
+            }
+        });
     }
 
     public void shutdown() {
@@ -130,46 +155,47 @@ class SessionManager implements Session {
         }
     }
 
+    public boolean isShutdown() {
+        return isShutdown.get();
+    }
+
     public Cluster getCluster() {
         return cluster;
     }
 
-    private PreparedStatement toPreparedStatement(String query, Connection.Future future) {
-        try {
-            Message.Response response = Uninterruptibles.getUninterruptibly(future);
-            switch (response.type) {
-                case RESULT:
-                    ResultMessage rm = (ResultMessage)response;
-                    switch (rm.kind) {
-                        case PREPARED:
-                            ResultMessage.Prepared pmsg = (ResultMessage.Prepared)rm;
-                            PreparedStatement stmt = PreparedStatement.fromMessage(pmsg, cluster.getMetadata(), query, poolsState.keyspace);
-                            cluster.manager.addPrepared(stmt);
-                            try {
-                                // All Sessions are connected to the same nodes so it's enough to prepare only the nodes of this session.
-                                // If that changes, we'll have to make sure this propagate to other sessions too.
-                                prepare(stmt.getQueryString(), future.getAddress());
-                            } catch (InterruptedException e) {
-                                Thread.currentThread().interrupt();
-                                // This method doesn't propagate interruption, at least not for now. However, if we've
-                                // interrupted preparing queries on other node it's not a problem as we'll re-prepare
-                                // later if need be. So just ignore.
-                            }
-                            return stmt;
-                        default:
-                            throw new DriverInternalError(String.format("%s response received when prepared statement was expected", rm.kind));
-                    }
-                case ERROR:
-                    DefaultResultSetFuture.extractCause(DefaultResultSetFuture.convertException(((ErrorMessage)response).error));
-                    break;
-                default:
-                    throw new DriverInternalError(String.format("%s response received when prepared statement was expected", response.type));
+    private ListenableFuture<PreparedStatement> toPreparedStatement(final String query, final Connection.Future future) {
+        return Futures.transform(future, new Function<Message.Response, PreparedStatement>() {
+            public PreparedStatement apply(Message.Response response) {
+                switch (response.type) {
+                    case RESULT:
+                        ResultMessage rm = (ResultMessage)response;
+                        switch (rm.kind) {
+                            case PREPARED:
+                                ResultMessage.Prepared pmsg = (ResultMessage.Prepared)rm;
+                                PreparedStatement stmt = PreparedStatement.fromMessage(pmsg, cluster.getMetadata(), query, poolsState.keyspace);
+                                stmt = cluster.manager.addPrepared(stmt);
+                                try {
+                                    // All Sessions are connected to the same nodes so it's enough to prepare only the nodes of this session.
+                                    // If that changes, we'll have to make sure this propagate to other sessions too.
+                                    prepare(stmt.getQueryString(), future.getAddress());
+                                } catch (InterruptedException e) {
+                                    Thread.currentThread().interrupt();
+                                    // This method doesn't propagate interruption, at least not for now. However, if we've
+                                    // interrupted preparing queries on other node it's not a problem as we'll re-prepare
+                                    // later if need be. So just ignore.
+                                }
+                                return stmt;
+                            default:
+                                throw new DriverInternalError(String.format("%s response received when prepared statement was expected", rm.kind));
+                        }
+                    case ERROR:
+                        DefaultResultSetFuture.extractCause(DefaultResultSetFuture.convertException(((ErrorMessage)response).error));
+                        throw new AssertionError();
+                    default:
+                        throw new DriverInternalError(String.format("%s response received when prepared statement was expected", response.type));
+                }
             }
-            throw new AssertionError();
-        } catch (ExecutionException e) {
-            DefaultResultSetFuture.extractCauseFromExecutionException(e);
-            throw new AssertionError();
-        }
+        }, executor()); // Since the transformation involves querying other nodes, we should not do that in an I/O thread
     }
 
     Connection.Factory connectionFactory() {
@@ -281,7 +307,7 @@ class SessionManager implements Session {
         long timeout = configuration().getSocketOptions().getConnectTimeoutMillis();
         try {
             Future<?> future = executeQuery(new QueryMessage("use " + keyspace, ConsistencyLevel.DEFAULT_CASSANDRA_CL), Query.DEFAULT);
-            // Note: using the connection timeout is perfectly correct, we should probably change that someday
+            // Note: using the connection timeout isn't perfectly correct, we should probably change that someday
             Uninterruptibles.getUninterruptibly(future, timeout, TimeUnit.MILLISECONDS);
         } catch (TimeoutException e) {
             throw new DriverInternalError(String.format("No responses after %d milliseconds while setting current keyspace. This should not happen, unless you have setup a very low connection timeout.", timeout));
@@ -307,7 +333,7 @@ class SessionManager implements Session {
 
             // Let's not wait too long if we can't get a connection. Things
             // will fix themselves once the user tries a query anyway.
-            Connection c = null;
+            PooledConnection c = null;
             try {
                 c = entry.getValue().borrowConnection(200, TimeUnit.MILLISECONDS);
                 c.write(new PrepareMessage(query)).get();
@@ -323,7 +349,7 @@ class SessionManager implements Session {
                 logger.error(String.format("Unexpected error while preparing query (%s) on %s", query, entry.getKey()), e);
             } finally {
                 if (c != null)
-                    entry.getValue().returnConnection(c);
+                    c.release();
             }
         }
     }
